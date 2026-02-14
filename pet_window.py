@@ -901,6 +901,8 @@ class PetWindow(Gtk.Window):
             self._drag_vel_y = 0.0
             self._drag_swing = 0.0
             self._drag_swing_vel = 0.0
+            self._draw_offset_x = 0
+            self._draw_offset_y = 0
             self.character.set_movement("drag", -1)
             return True
         elif event.button == 3:
