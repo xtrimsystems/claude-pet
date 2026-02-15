@@ -860,6 +860,9 @@ class PetWindow(Gtk.Window):
             return False
         if new_state and new_state != self.character.state:
             logger.debug("Bridge callback: %s -> %s", self.character.state, new_state)
+            # "doubling" triggers clone-kill — lock out bridge until animation finishes
+            if new_state == "doubling" and self._clone_window is None:
+                self._manual_override = True
             self.character.set_state(new_state)
         return False
 
@@ -1168,6 +1171,14 @@ class PetWindow(Gtk.Window):
         self._mascot_path = path
         self.character = new_char
         logger.info("Switched mascot to %s (%d sprites)", path, len(new_char._sprites))
+        # Persist selection as default
+        try:
+            from main import load_config, save_config
+            cfg = load_config()
+            cfg["mascot"] = os.path.basename(path)
+            save_config(cfg)
+        except Exception:
+            pass
 
     def _on_menu_set_state(self, widget: Gtk.MenuItem, state: str) -> None:
         self._manual_override = True

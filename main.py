@@ -6,6 +6,7 @@ state of a Claude Code session through pixel art animations.
 """
 
 import argparse
+import json
 import logging
 import os
 import signal
@@ -23,6 +24,8 @@ logger = logging.getLogger("claude-pet")
 
 VALID_POSITIONS = ("top-left", "top-right", "bottom-left", "bottom-right", "center")
 DEFAULT_SPRITES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sprites")
+CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "claude-pet")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -114,6 +117,20 @@ def remove_pid() -> None:
         pass
 
 
+def load_config() -> dict:
+    try:
+        with open(CONFIG_FILE) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_config(cfg: dict) -> None:
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
 def main() -> None:
     args = parse_args()
     setup_logging(args.debug)
@@ -129,9 +146,14 @@ def main() -> None:
     )
 
     bridge = ClaudeBridge(state_file=args.state_file)
+    config = load_config()
 
-    # Resolve mascot path: explicit --mascot, or first subdirectory in sprites/
+    # Resolve mascot path: explicit --mascot > saved config > first in sprites/
     mascot_path = args.mascot
+    if mascot_path is None and config.get("mascot"):
+        candidate = os.path.join(DEFAULT_SPRITES_DIR, config["mascot"])
+        if os.path.isdir(candidate):
+            mascot_path = candidate
     if mascot_path is None:
         for entry in sorted(os.listdir(DEFAULT_SPRITES_DIR)):
             candidate = os.path.join(DEFAULT_SPRITES_DIR, entry)

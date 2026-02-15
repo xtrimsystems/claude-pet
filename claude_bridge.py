@@ -10,7 +10,7 @@ Valid states: "idle", "thinking", "working", "attention", "celebrating", "error"
 import os
 import time
 
-VALID_STATES = {"idle", "thinking", "working", "attention", "celebrating", "error"}
+VALID_STATES = {"idle", "thinking", "working", "attention", "celebrating", "error", "doubling"}
 DEFAULT_STATE = "idle"
 POLL_INTERVAL_MS = 300
 IDLE_TIMEOUT_S = 30
