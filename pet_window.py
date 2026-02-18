@@ -44,6 +44,7 @@ FRAME_INTERVAL_MS = 1000 // 60
 TEST_STATES = ("idle", "thinking", "working", "attention", "celebrating")
 SPRITE_BASE = 128  # Shimeji sprites are 128x128
 SCALE_OPTIONS = (0.5, 1.0, 1.5, 2.0)
+LABEL_HEIGHT = 20  # Extra height below sprite for project name label
 
 
 # ======================================================================
@@ -107,10 +108,12 @@ class WanderEngine:
     FALL_CHANCE_TOP = 0.0008   # per-frame chance to fall while on ceiling
 
     def __init__(self, monitors: list[tuple[int, int, int, int]],
-                 pet_size: int, margin: int = 2,
+                 pet_size: int, pet_height: int | None = None,
+                 margin: int = 2,
                  active: bool = False) -> None:
         self._monitors = monitors
         self._pet_size = pet_size
+        self._pet_height = pet_height or pet_size
         self._margin = margin
         self.active_mode = active
 
@@ -143,7 +146,7 @@ class WanderEngine:
         self.x_min = mx + self._margin
         self.x_max = mx + mw - self._pet_size - self._margin
         self.y_min = my + self._margin
-        self.y_max = my + mh - self._pet_size - self._margin
+        self.y_max = my + mh - self._pet_height - self._margin
 
     def set_active_monitor_at(self, x: float, y: float) -> None:
         """Switch active monitor to the one containing (x, y)."""
@@ -610,6 +613,7 @@ class PetWindow(Gtk.Window):
         debug: bool = False,
         sprites_dir: str | None = None,
         mascot_path: str | None = None,
+        project_name: str | None = None,
     ) -> None:
         super().__init__(type=Gtk.WindowType.POPUP)
 
@@ -620,6 +624,8 @@ class PetWindow(Gtk.Window):
         self._debug = debug
         self._sprites_dir = sprites_dir
         self._mascot_path = mascot_path
+        self._project_name = project_name
+        self._label_height = LABEL_HEIGHT if project_name else 0
 
         self._drag_active = False
         self._drag_offset_x = 0.0
@@ -643,6 +649,7 @@ class PetWindow(Gtk.Window):
         self._wander: WanderEngine | None = None
         self._draw_offset_x: int = 0
         self._draw_offset_y: int = 0
+        self._label_on_top: bool = True
         self._clone_window: CloneWindow | None = None
         self._clone_falling: bool = False
 
@@ -659,7 +666,7 @@ class PetWindow(Gtk.Window):
     # ------------------------------------------------------------------
 
     def _setup_window(self) -> None:
-        self.set_default_size(self._size, self._size)
+        self.set_default_size(self._size, self._size + self._label_height)
         self.set_resizable(False)
         self.set_decorated(False)
         self.set_keep_above(True)
@@ -682,7 +689,7 @@ class PetWindow(Gtk.Window):
 
     def _setup_drawing(self) -> None:
         self._drawing_area = Gtk.DrawingArea()
-        self._drawing_area.set_size_request(self._size, self._size)
+        self._drawing_area.set_size_request(self._size, self._size + self._label_height)
         self._drawing_area.connect("draw", self._on_draw)
         self.add(self._drawing_area)
 
@@ -723,13 +730,13 @@ class PetWindow(Gtk.Window):
             y += edge_offset
         elif self._position == "bottom-left":
             x += edge_offset
-            y += geom.height - self._size - edge_offset
+            y += geom.height - self._size - self._label_height - edge_offset
         elif self._position == "center":
             x += (geom.width - self._size) // 2
-            y += (geom.height - self._size) // 2
+            y += (geom.height - self._size - self._label_height) // 2
         else:
             x += geom.width - self._size - edge_offset
-            y += geom.height - self._size - edge_offset
+            y += geom.height - self._size - self._label_height - edge_offset
 
         self.move(x, y)
         logger.debug("Window placed at (%d, %d)", x, y)
@@ -743,6 +750,7 @@ class PetWindow(Gtk.Window):
         self._wander = WanderEngine(
             monitors=monitors,
             pet_size=self._size,
+            pet_height=self._size + self._label_height,
             active=self._debug,
         )
         logger.debug("Monitors: %s", monitors)
@@ -844,15 +852,19 @@ class PetWindow(Gtk.Window):
             if ms == Move.CLIMB_LEFT:
                 self._draw_offset_x = -int(self._size * 0.50)
                 self._draw_offset_y = 0
+                self._label_on_top = True
             elif ms == Move.CLIMB_RIGHT:
                 self._draw_offset_x = int(self._size * 0.50)
                 self._draw_offset_y = 0
+                self._label_on_top = True
             elif ms == Move.WALK_TOP:
                 self._draw_offset_x = 0
                 self._draw_offset_y = -int(self._size * 0.40)
+                self._label_on_top = False
             else:
                 self._draw_offset_x = 0
                 self._draw_offset_y = 0
+                self._label_on_top = True
             self.move(new_x, new_y)
 
         # Sync movement state to character (for sprite selection)
@@ -919,13 +931,45 @@ class PetWindow(Gtk.Window):
         ctx.set_operator(cairo.OPERATOR_OVER)
 
         width = widget.get_allocated_width()
-        height = widget.get_allocated_height()
 
-        # Shift sprite within the window (character hugs screen edges)
-        if self._draw_offset_x or self._draw_offset_y:
-            ctx.translate(self._draw_offset_x, self._draw_offset_y)
+        # Label on top: sprite shifts down; label on bottom: sprite stays at 0
+        sprite_y = self._label_height if self._label_on_top else 0
 
-        self.character.draw(ctx, width, height)
+        # Draw sprite (shifted to hug screen edges + label offset)
+        ctx.save()
+        ctx.translate(self._draw_offset_x, self._draw_offset_y + sprite_y)
+        self.character.draw(ctx, width, self._size)
+        ctx.restore()
+
+        # Draw project name label — positioned relative to sprite's draw offsets
+        if self._project_name and self._label_height > 0:
+            ctx.save()
+            ctx.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+            ctx.set_font_size(11)
+            extents = ctx.text_extents(self._project_name)
+
+            # Follow sprite x-offset partially (stay near sprite, slightly toward center)
+            label_x_shift = self._draw_offset_x * 0.3
+            text_x = (width - extents.width) / 2 - extents.x_bearing + label_x_shift
+
+            if self._label_on_top:
+                text_y = sprite_y - 5
+            else:
+                # Just below the sprite's visual bottom
+                text_y = self._draw_offset_y + self._size + 6
+
+            # Dark outline for readability on any background
+            ctx.set_source_rgba(0, 0, 0, 0.8)
+            for dx, dy in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
+                ctx.move_to(text_x + dx, text_y + dy)
+                ctx.show_text(self._project_name)
+
+            # White text
+            ctx.set_source_rgba(1, 1, 1, 0.95)
+            ctx.move_to(text_x, text_y)
+            ctx.show_text(self._project_name)
+            ctx.restore()
+
         return True
 
     # ------------------------------------------------------------------
@@ -1028,6 +1072,13 @@ class PetWindow(Gtk.Window):
 
     def _show_context_menu(self, event: Gdk.EventButton) -> None:
         menu = Gtk.Menu()
+
+        # Project name header (non-clickable)
+        if self._project_name:
+            name_item = Gtk.MenuItem(label=self._project_name)
+            name_item.set_sensitive(False)
+            menu.append(name_item)
+            menu.append(Gtk.SeparatorMenuItem())
 
         # Auto mode — follow bridge
         auto_item = Gtk.CheckMenuItem(label="Auto (follow Claude)")
@@ -1195,9 +1246,10 @@ class PetWindow(Gtk.Window):
             return
         win_x, win_y = self.get_position()
         self._size = new_size
-        self._drawing_area.set_size_request(new_size, new_size)
+        total_h = new_size + self._label_height
+        self._drawing_area.set_size_request(new_size, total_h)
         # set_size_request on the window itself forces the resize even when non-resizable
-        self.set_size_request(new_size, new_size)
+        self.set_size_request(new_size, total_h)
         self._init_wander()
         self._wander.x = float(win_x)
         # Snap to ground after rescale (pet size changed so old y is wrong)

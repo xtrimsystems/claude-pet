@@ -9,11 +9,19 @@ start:
 	python3 main.py &
 	@echo "Claude Pet started in background (PID: $$!)"
 
-# Stop the pet
+# Stop the pet (kills default instance and all per-project instances)
 stop:
-	@if [ -f /tmp/claude-pet.pid ]; then \
-		kill $$(cat /tmp/claude-pet.pid) 2>/dev/null && echo "Claude Pet stopped" || echo "Claude Pet not running"; \
-	else echo "Claude Pet not running"; fi
+	@found=false; \
+	for pidfile in /tmp/claude-pet*.pid; do \
+		[ -f "$$pidfile" ] || continue; \
+		pid=$$(cat "$$pidfile" 2>/dev/null); \
+		if [ -n "$$pid" ] && kill "$$pid" 2>/dev/null; then \
+			echo "Stopped Claude Pet (PID $$pid, $$pidfile)"; \
+			found=true; \
+		fi; \
+		rm -f "$$pidfile"; \
+	done; \
+	$$found || echo "Claude Pet not running"
 
 # Run with debug logging
 debug:

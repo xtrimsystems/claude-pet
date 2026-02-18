@@ -103,6 +103,18 @@ pet_hooks = {
             ]
         }
     ],
+    "SessionEnd": [
+        {
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"{hook_script} stop",
+                    "timeout": 5
+                }
+            ]
+        }
+    ],
 }
 
 # Load existing settings or start fresh

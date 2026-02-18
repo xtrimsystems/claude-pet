@@ -64,6 +64,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Path to mascot directory with shime*.png sprites (Shimeji-ee / Shijima-Qt format)",
     )
+    parser.add_argument(
+        "--pid-file",
+        type=str,
+        default="/tmp/claude-pet.pid",
+        help="Path to the PID file (default: /tmp/claude-pet.pid)",
+    )
+    parser.add_argument(
+        "--project-name",
+        type=str,
+        default=None,
+        help="Project name to display below the pet sprite",
+    )
     return parser.parse_args(argv)
 
 
@@ -89,14 +101,11 @@ def setup_signal_handlers() -> None:
     signal.signal(signal.SIGTERM, handle_signal)
 
 
-PID_FILE = "/tmp/claude-pet.pid"
-
-
-def check_single_instance() -> None:
+def check_single_instance(pid_file: str) -> None:
     """Exit if another instance is already running."""
-    if os.path.exists(PID_FILE):
+    if os.path.exists(pid_file):
         try:
-            with open(PID_FILE) as f:
+            with open(pid_file) as f:
                 pid = int(f.read().strip())
             os.kill(pid, 0)  # raises if process doesn't exist
             logger.info("Already running (PID %d), exiting", pid)
@@ -105,14 +114,14 @@ def check_single_instance() -> None:
             pass  # stale PID file, continue
 
 
-def write_pid() -> None:
-    with open(PID_FILE, "w") as f:
+def write_pid(pid_file: str) -> None:
+    with open(pid_file, "w") as f:
         f.write(str(os.getpid()))
 
 
-def remove_pid() -> None:
+def remove_pid(pid_file: str) -> None:
     try:
-        os.unlink(PID_FILE)
+        os.unlink(pid_file)
     except OSError:
         pass
 
@@ -134,15 +143,17 @@ def save_config(cfg: dict) -> None:
 def main() -> None:
     args = parse_args()
     setup_logging(args.debug)
-    check_single_instance()
+    check_single_instance(args.pid_file)
     setup_signal_handlers()
-    write_pid()
+    write_pid(args.pid_file)
 
     logger.info(
-        "Starting Claude Pet: size=%d, position=%s, state_file=%s",
+        "Starting Claude Pet: size=%d, position=%s, state_file=%s, pid_file=%s, project=%s",
         args.size,
         args.position,
         args.state_file,
+        args.pid_file,
+        args.project_name or "(default)",
     )
 
     bridge = ClaudeBridge(state_file=args.state_file)
@@ -181,11 +192,12 @@ def main() -> None:
         debug=args.debug,
         sprites_dir=DEFAULT_SPRITES_DIR,
         mascot_path=mascot_path,
+        project_name=args.project_name,
     )
     window.show_all()
 
     Gtk.main()
-    remove_pid()
+    remove_pid(args.pid_file)
     logger.info("Claude Pet shut down")
 
 

@@ -6,10 +6,10 @@ Shimeji-style desktop pet for Claude Code. A transparent, always-on-top GTK3 win
 
 4 Python files, no build system (runs directly with system python3):
 
-- **main.py** - Entry point. Parses args, loads config from `~/.config/claude-pet/config.json`, resolves mascot path, creates `SpriteCharacter` + `ClaudeBridge` + `PetWindow`, starts GTK main loop. Single-instance via PID file at `/tmp/claude-pet.pid`.
+- **main.py** - Entry point. Parses args (`--project-name`, `--pid-file`, `--state-file`, etc.), loads config from `~/.config/claude-pet/config.json`, resolves mascot path, creates `SpriteCharacter` + `ClaudeBridge` + `PetWindow`, starts GTK main loop. Per-project single-instance via PID files at `/tmp/claude-pet-{hash}.pid`.
 - **pet_window.py** - The core. Contains `PetWindow` (GTK POPUP window), `WanderEngine` (movement AI), and `CloneWindow` (temporary overlay for clone-kill animation). Runs at 60fps via GLib timer.
 - **sprite_character.py** - Loads shime*.png sprites from mascot directories. Defines two animation config dicts: `_state_config` (Claude states) and `_move_config` (movement animations). Handles frame advancement, looping, and state transitions.
-- **claude_bridge.py** - Polls `/tmp/claude-pet-state` every 300ms for state changes. Has a 60-second idle timeout that auto-transitions to idle if no state change occurs. Valid states: idle, thinking, working, attention, celebrating, doubling.
+- **claude_bridge.py** - Polls the state file (per-project: `/tmp/claude-pet-{hash}-state`) every 300ms for state changes. Has a 60-second idle timeout that auto-transitions to idle if no state change occurs. Valid states: idle, thinking, working, attention, celebrating, doubling.
 
 ## Animation System (sprite_character.py)
 
@@ -45,15 +45,16 @@ When Claude state is working, thinking, error, attention, doubling, clone_frozen
 ## State Triggering - Three Sources
 
 ### 1. Claude Code hooks (claude_bridge.py)
-Hooks are configured in `~/.claude/settings.json` (global) and call `hooks/state-hook.sh` which writes to `/tmp/claude-pet-state`. Bridge polls this file every 300ms.
+Hooks are configured in `~/.claude/settings.json` (global) and call `hooks/state-hook.sh` which reads JSON from stdin to extract `cwd`, derives a per-project hash, and writes to per-project state files (`/tmp/claude-pet-{hash}-state`). Bridge polls this file every 300ms.
 
 Current hook mapping (in `~/.claude/settings.json`, installed by `hooks/install-hooks.sh`):
-- **SessionStart** -> "idle" (pet resets when Claude session begins)
+- **SessionStart** -> "idle" (pet resets when Claude session begins; auto-starts the pet if not running)
 - **UserPromptSubmit** -> "thinking" (user sent a message, Claude is processing the prompt)
 - **PreToolUse** -> "working" (tool is about to execute - the actual work)
 - **PermissionRequest** -> "attention" (Claude needs permission approval)
 - **Stop** -> "celebrating" (Claude finished - plays celebrate animation, then auto-transitions to idle)
 - **PreCompact** -> "doubling" (Claude is compacting context - triggers clone-kill animation)
+- **SessionEnd** -> "stop" (kills the pet for this project and cleans up state/PID files)
 
 The typical flow: UserPromptSubmit(thinking) -> PreToolUse(working) -> PreToolUse(working) -> ... -> Stop(celebrating) -> idle.
 
@@ -105,6 +106,28 @@ Note: PostToolUse and PostToolUseFailure are intentionally not hooked — they f
 4. Original plays "clone_dying" [19, 18, 20], then after 900ms `_on_clone_death_done` swaps positions
 5. Original teleports to clone position, clone window destroyed, state returns to idle
 
+## Multi-Instance Support
+
+Each Claude Code session spawns its own pet, identified by project folder:
+
+- `state-hook.sh` reads `cwd` from hook stdin JSON, derives `project_name` (basename) and an 8-char MD5 hash of the full path
+- Per-project files: `/tmp/claude-pet-{hash}-state` and `/tmp/claude-pet-{hash}.pid`
+- `main.py` accepts `--project-name`, `--pid-file`, `--state-file` args
+- `SessionEnd` hook kills the pet for that specific project
+- `make stop` kills all pet instances (globs `/tmp/claude-pet*.pid`)
+
+## Project Name Label
+
+When `--project-name` is set, a floating label is drawn near the sprite via cairo:
+
+- **LABEL_HEIGHT = 20** — extra window height for the label
+- **Label on top** by default (sprite shifted down by `LABEL_HEIGHT`)
+- **Label on bottom** when on the ceiling (`_label_on_top = False`)
+- **Label follows sprite x-offset** at 30% intensity during wall climbs (stays near sprite, slightly toward center)
+- White bold text with dark outline (4-corner shadow) for readability on any background
+- `WanderEngine` uses separate `pet_size` (width) and `pet_height` (height) so the label height doesn't affect x-bounds
+- Project name also shown as a disabled menu item at the top of the right-click context menu
+
 ## Key Technical Details
 
 - **GTK POPUP window** - bypasses window manager (no tiling in i3). Uses `Gdk.WindowTypeHint.DOCK`.
@@ -121,7 +144,7 @@ Note: PostToolUse and PostToolUseFailure are intentionally not hooked — they f
 make run          # foreground
 make debug        # with debug logging (activates "active" wander mode)
 make start        # background
-make stop         # kill
+make stop         # kill all pet instances
 make test-states  # cycle through all states
 make test-working # set a specific state
 make install      # install hooks + launcher
