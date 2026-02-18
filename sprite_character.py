@@ -48,7 +48,8 @@ class SpriteCharacter:
                     continue
                 self._sprites[i] = cairo.ImageSurface.create_from_png(path)
 
-        # Claude state animations
+        # State-override animations (triggered by Claude hooks or wander engine)
+        # These freeze movement and take priority over move animations.
         # sprites: list of shime indices, delay: ms per frame
         self._state_config: dict[str, dict] = {
             "idle": {
@@ -60,16 +61,16 @@ class SpriteCharacter:
                 "delay": 350,
             },
             "working": {
-                "sprites": [1, 27, 16, 28, 17, 29],
-                "delay": 150,
+                "sprites": [47, 48, 48, 48, 47],
+                "delay": 600,
             },
             "attention": {
                 "sprites": [11, 15],
                 "delay": 300,
             },
             "celebrating": {
-                "sprites": [26, 15, 27, 16, 28, 17, 29, 11],
-                "delay": 200,
+                "sprites": [49, 50],
+                "delay": 300,
                 "loop": False,
                 "next": "idle",
             },
@@ -118,12 +119,12 @@ class SpriteCharacter:
                 "sprites": [25, 23, 24],
                 "delay": 200,
             },
-            "jump_launch": {
-                "sprites": [22],
+            "kick": {
+                "sprites": [37],
                 "delay": 150,
             },
-            "jump_air": {
-                "sprites": [37],
+            "jump_launch": {
+                "sprites": [22],
                 "delay": 150,
             },
             "fall": {
@@ -154,9 +155,13 @@ class SpriteCharacter:
                 "sprites": [9],
                 "delay": 200,
             },
-            "land": {
+            "bad_land": {
                 "sprites": [18, 19],
                 "delay": 250,
+            },
+            "good_land": {
+                "sprites": [1],
+                "delay": 500,
             },
             "hard_land": {
                 "sprites": [18, 20, 21, 21, 19],

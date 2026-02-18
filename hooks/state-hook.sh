@@ -4,7 +4,7 @@
 # Called by Claude Code hooks to update pet state.
 #
 # Auto-starts the pet if not already running (uses PID file).
-# Valid states: idle, thinking, working, attention, celebrating, error
+# Valid states: idle, thinking, working, attention, celebrating, doubling
 
 STATE_FILE="/tmp/claude-pet-state"
 PID_FILE="/tmp/claude-pet.pid"

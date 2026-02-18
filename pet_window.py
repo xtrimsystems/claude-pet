@@ -41,7 +41,7 @@ class ClaudeBridgeProto(Protocol):
 
 
 FRAME_INTERVAL_MS = 1000 // 60
-TEST_STATES = ("idle", "thinking", "working", "attention", "celebrating", "error")
+TEST_STATES = ("idle", "thinking", "working", "attention", "celebrating")
 SPRITE_BASE = 128  # Shimeji sprites are 128x128
 SCALE_OPTIONS = (0.5, 1.0, 1.5, 2.0)
 
@@ -55,10 +55,12 @@ class Move(enum.Enum):
     WALK_TOP = "walk_top"
     CLIMB_LEFT = "climb_left"
     CLIMB_RIGHT = "climb_right"
+    KICK = "kick"
     JUMP = "jump"
     FALL = "fall"
     THROW = "throw"
-    LAND = "land"
+    BAD_LAND = "bad_land"
+    GOOD_LAND = "good_land"
     HARD_LAND = "hard_land"
     SIT = "sit"
 
@@ -75,7 +77,7 @@ class WanderEngine:
       - **active** (--debug): moves frequently, great for testing.
     """
 
-    WALK_SPEED = 0.7            # px/frame @60fps (~42 px/sec)
+    WALK_SPEED = 1              # px/frame @60fps (~42 px/sec)
     CLIMB_SPEED = 0.8           # px/frame @60fps (~48 px/sec)
     FALL_SPEED_INIT = 1.5       # px/frame initial fall
     FALL_ACCEL = 0.35           # px/frame² gravity @60fps (heavy)
@@ -87,13 +89,12 @@ class WanderEngine:
     JUMP_VX_SMALL = 1.5            # horizontal push for small jumps
     JUMP_VX_BIG = 7.0              # horizontal push for big jumps (wider arc)
     JUMP_GRAVITY = 0.12            # gravity during jump
-    JUMP_BIG_CHANCE = 0.3          # 30% chance of big jump
 
     # Behavior weights (higher = more likely to be chosen)
     #   sit:   stay put          walk:  walk on ground
     #   climb: climb nearest edge
-    CALM_WEIGHTS   = {"sit": 200, "walk": 50, "climb": 10, "jump": 8, "clone_kill": 2, "celebrating": 3, "error": 2, "thinking": 5}
-    ACTIVE_WEIGHTS = {"sit":  50, "walk": 150, "climb": 40, "jump": 25, "clone_kill": 5, "celebrating": 8, "error": 5, "thinking": 10}
+    CALM_WEIGHTS   = {"sit": 200, "walk": 50, "climb": 10, "kick": 6, "jump": 2, "clone_kill": 2, "celebrating": 3, "error": 2, "thinking": 5}
+    ACTIVE_WEIGHTS = {"sit":  50, "walk": 150, "climb": 40, "kick": 18, "jump": 7, "clone_kill": 5, "celebrating": 8, "error": 5, "thinking": 10}
 
     # Sit durations (frames at 60 fps)
     CALM_SIT   = (600, 2400)   # 10–40 s
@@ -130,9 +131,7 @@ class WanderEngine:
         self._fall_start_y = 0.0
         self._jump_vx = 0.0
         self._jump_vy = 0.0
-        self._jump_phase = 0       # 0=launch, 1=airborne
-        self._jump_peak_y = 0.0    # highest point reached
-        self._jump_is_big = False
+        self._jump_peak_y = 0.0
         self.pending_anim: str | None = None
 
     # --- active monitor ---
@@ -180,6 +179,8 @@ class WanderEngine:
                     elif self.x >= self.x_max - 20:
                         return Move.CLIMB_RIGHT
                     return Move.WALK_GROUND  # not near edge, walk
+                elif behavior == "kick":
+                    return Move.KICK
                 elif behavior == "jump":
                     return Move.JUMP
                 elif behavior in ("clone_kill", "celebrating", "error", "thinking"):
@@ -196,7 +197,7 @@ class WanderEngine:
 
     def tick(self, anim_state: str) -> tuple[int, int]:
         if anim_state in ("working", "thinking", "error", "attention",
-                          "doubling", "clone_frozen", "clone_dying"):
+                          "doubling", "clone_frozen", "clone_dying", "celebrating"):
             return int(self.x), int(self.y)
 
         if self.move_state == Move.WALK_GROUND:
@@ -207,13 +208,17 @@ class WanderEngine:
             self._do_climb_left()
         elif self.move_state == Move.CLIMB_RIGHT:
             self._do_climb_right()
+        elif self.move_state == Move.KICK:
+            self._do_kick()
         elif self.move_state == Move.JUMP:
             self._do_jump()
         elif self.move_state == Move.FALL:
             self._do_fall()
         elif self.move_state == Move.THROW:
             self._do_throw()
-        elif self.move_state == Move.LAND:
+        elif self.move_state == Move.BAD_LAND:
+            self._do_land()
+        elif self.move_state == Move.GOOD_LAND:
             self._do_land()
         elif self.move_state == Move.HARD_LAND:
             self._do_hard_land()
@@ -303,7 +308,7 @@ class WanderEngine:
             self.move_state = Move.HARD_LAND
             self._land_timer = 43
         else:
-            self.move_state = Move.LAND
+            self.move_state = Move.BAD_LAND
             self._land_timer = 20
 
     def _do_land(self) -> None:
@@ -337,6 +342,8 @@ class WanderEngine:
             self._start_walk()
         elif nxt in (Move.CLIMB_LEFT, Move.CLIMB_RIGHT):
             self.move_state = nxt
+        elif nxt == Move.KICK:
+            self._start_kick()
         elif nxt == Move.JUMP:
             self._start_jump()
         else:
@@ -353,18 +360,45 @@ class WanderEngine:
         lo, hi = self._walk_range()
         self._walk_timer = random.randint(lo, hi)
 
-    def _start_jump(self) -> None:
-        self.move_state = Move.JUMP
-        self._jump_is_big = random.random() < self.JUMP_BIG_CHANCE
-        if self._jump_is_big:
-            vy = random.uniform(*self.JUMP_VY_BIG)
-            vx = self.JUMP_VX_BIG
-        else:
-            vy = random.uniform(*self.JUMP_VY_SMALL)
-            vx = self.JUMP_VX_SMALL
+    def _start_kick(self) -> None:
+        self.move_state = Move.KICK
+        vy = random.uniform(*self.JUMP_VY_SMALL)
+        vx = self.JUMP_VX_SMALL
         self._jump_vx = vx * self.direction
         self._jump_vy = vy
-        self._jump_phase = 0  # launch
+        self._jump_peak_y = self.y
+        self._fall_start_y = self.y
+
+    def _do_kick(self) -> None:
+        self._jump_vy += self.JUMP_GRAVITY
+        self.x += self._jump_vx
+        self.y += self._jump_vy
+
+        if self.y < self._jump_peak_y:
+            self._jump_peak_y = self.y
+
+        if self.y >= self.y_max:
+            self.y = self.y_max
+            self.move_state = Move.GOOD_LAND
+            self._land_timer = 30
+            return
+
+        if self.x <= self.x_min:
+            self.x = self.x_min
+            self.move_state = Move.CLIMB_LEFT
+            return
+
+        if self.x >= self.x_max:
+            self.x = self.x_max
+            self.move_state = Move.CLIMB_RIGHT
+            return
+
+    def _start_jump(self) -> None:
+        self.move_state = Move.JUMP
+        vy = random.uniform(*self.JUMP_VY_BIG)
+        vx = self.JUMP_VX_BIG
+        self._jump_vx = vx * self.direction
+        self._jump_vy = vy
         self._jump_peak_y = self.y
         self._fall_start_y = self.y
 
@@ -373,22 +407,20 @@ class WanderEngine:
         self.x += self._jump_vx
         self.y += self._jump_vy
 
-        # Track peak (highest point)
         if self.y < self._jump_peak_y:
             self._jump_peak_y = self.y
-
-        # Switch from launch sprite to airborne after 8 frames
-        if self._jump_phase == 0:
-            self._jump_phase += 1
 
         # Hit ground?
         if self.y >= self.y_max:
             self.y = self.y_max
-            if self._jump_is_big:
+            if random.random() < 0.5:
+                # Nailed the landing — hold standing pose before next behavior
+                self.move_state = Move.GOOD_LAND
+                self._land_timer = 40
+            else:
+                # Faceplant
                 self._fall_start_y = self._jump_peak_y
                 self._land_from_fall()
-            else:
-                self._transition()
             return
 
         # Hit left wall? Stick and climb!
@@ -605,6 +637,7 @@ class PetWindow(Gtk.Window):
         # animation finishes (non-looping) or user picks "Auto".
         self._manual_override = False
         self._menu_timeout_id: int | None = None
+        self._wander_anim_timer_id: int | None = None
 
         self._frame_timer_id: int | None = None
         self._wander: WanderEngine | None = None
@@ -742,7 +775,7 @@ class PetWindow(Gtk.Window):
         prev_state = self.character.state
         self.character.tick()
 
-        # If a non-looping animation just finished (state changed back to idle),
+        # If a non-looping animation just finished (state changed),
         # clear the manual override so the bridge can take over again.
         if self._manual_override and prev_state != self.character.state:
             if not self.character.is_busy:
@@ -787,15 +820,24 @@ class PetWindow(Gtk.Window):
                 and self._wander is not None):
             new_x, new_y = self._wander.tick(self.character.state)
             # Check if wander wants to trigger a character animation
+            # Only apply during idle — don't override bridge states like attention
             if self._wander.pending_anim:
                 anim = self._wander.pending_anim
                 self._wander.pending_anim = None
-                if anim == "clone_kill":
-                    if self._clone_window is None:
-                        self._manual_override = True
-                        self.character.set_state("doubling")
-                else:
-                    self.character.set_state(anim)
+                if self.character.state == "idle":
+                    if anim == "clone_kill":
+                        if self._clone_window is None:
+                            self._manual_override = True
+                            self.character.set_state("doubling")
+                    elif anim == "thinking":
+                        self.character.set_state(anim)
+                        # Looping state — auto-clear after 3 seconds
+                        if self._wander_anim_timer_id is not None:
+                            GLib.source_remove(self._wander_anim_timer_id)
+                        self._wander_anim_timer_id = GLib.timeout_add(
+                            3000, self._on_wander_anim_timeout)
+                    else:
+                        self.character.set_state(anim)
             # Shift sprite inside the window to hug screen edges
             # Window stays put, character moves within it
             ms = self._wander.move_state
@@ -823,14 +865,14 @@ class PetWindow(Gtk.Window):
                 Move.CLIMB_RIGHT: "climb",
                 Move.FALL: "fall",
                 Move.THROW: "fall",
-                Move.LAND: "land",
+                Move.BAD_LAND: "bad_land",
+                Move.GOOD_LAND: "good_land",
                 Move.HARD_LAND: "hard_land",
                 Move.SIT: "sit",
+                Move.KICK: "kick",
+                Move.JUMP: "jump_launch",
             }
             move_name = move_map.get(self._wander.move_state, "")
-            # Jump: launch sprite first, then airborne
-            if self._wander.move_state == Move.JUMP:
-                move_name = "jump_launch" if self._wander._jump_phase == 0 else "jump_air"
             # Climb sprites face left; face toward the wall
             if self._wander.move_state == Move.CLIMB_LEFT:
                 facing = -1
@@ -1035,6 +1077,10 @@ class PetWindow(Gtk.Window):
         menu.append(Gtk.SeparatorMenuItem())
 
         # Movement actions
+        kick_item = Gtk.MenuItem(label="Kick!")
+        kick_item.connect("activate", self._on_menu_kick)
+        menu.append(kick_item)
+
         jump_item = Gtk.MenuItem(label="Jump!")
         jump_item.connect("activate", self._on_menu_jump)
         menu.append(jump_item)
@@ -1058,6 +1104,16 @@ class PetWindow(Gtk.Window):
 
         menu.show_all()
         menu.popup_at_pointer(event)
+
+    def _on_wander_anim_timeout(self) -> bool:
+        self._wander_anim_timer_id = None
+        if not self._manual_override:
+            self.character.set_state("idle")
+        return False
+
+    def _on_menu_kick(self, widget: Gtk.MenuItem) -> None:
+        if self._wander is not None:
+            self._wander._start_kick()
 
     def _on_menu_jump(self, widget: Gtk.MenuItem) -> None:
         if self._wander is not None:
@@ -1137,15 +1193,14 @@ class PetWindow(Gtk.Window):
         new_size = int(SPRITE_BASE * scale)
         if new_size == self._size:
             return
-        # Remember position, resize, re-init wander on new monitor bounds
         win_x, win_y = self.get_position()
         self._size = new_size
         self._drawing_area.set_size_request(new_size, new_size)
-        self.resize(new_size, new_size)
+        # set_size_request on the window itself forces the resize even when non-resizable
+        self.set_size_request(new_size, new_size)
         self._init_wander()
         self._wander.x = float(win_x)
-        self._wander.y = float(win_y)
-        # Always snap to ground after rescale (pet size changed so old y is wrong)
+        # Snap to ground after rescale (pet size changed so old y is wrong)
         self._wander.y = self._wander.y_max
         self.move(int(self._wander.x), int(self._wander.y))
         logger.debug("Scale changed to %.1fx (%dpx)", scale, new_size)

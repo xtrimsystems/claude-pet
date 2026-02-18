@@ -11,7 +11,9 @@ start:
 
 # Stop the pet
 stop:
-	@pkill -f 'python3 main.py' && echo "Claude Pet stopped" || echo "Claude Pet not running"
+	@if [ -f /tmp/claude-pet.pid ]; then \
+		kill $$(cat /tmp/claude-pet.pid) 2>/dev/null && echo "Claude Pet stopped" || echo "Claude Pet not running"; \
+	else echo "Claude Pet not running"; fi
 
 # Run with debug logging
 debug:
@@ -28,7 +30,7 @@ uninstall:
 # Test: cycle through all states (useful for development)
 test-states:
 	@echo "Testing state transitions..."
-	@for state in working thinking attention celebrating error idle; do \
+	@for state in working thinking attention celebrating doubling idle; do \
 		echo "  State: $$state"; \
 		echo "$$state" > /tmp/claude-pet-state; \
 		sleep 3; \
@@ -39,11 +41,6 @@ test-states:
 test-%:
 	@echo "$*" > /tmp/claude-pet-state
 	@echo "Set state to: $*"
-
-# Clean up
-clean:
-	rm -f /tmp/claude-pet-state
-	rm -f claude-pet
 
 help:
 	@echo "Claude Pet - Desktop companion for Claude Code"
@@ -56,4 +53,3 @@ help:
 	@echo "  make uninstall     Remove hooks"
 	@echo "  make test-states   Cycle through all states"
 	@echo "  make test-STATE    Set a specific state (e.g., make test-attention)"
-	@echo "  make clean         Remove temp files"

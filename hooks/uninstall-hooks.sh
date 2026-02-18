@@ -2,11 +2,11 @@
 # Uninstall Claude Pet hooks from Claude Code settings.
 #
 # Removes only the claude-pet hook entries from
-# ~/.claude/settings.local.json, leaving everything else untouched.
+# ~/.claude/settings.json, leaving everything else untouched.
 
 set -e
 
-SETTINGS_FILE="$HOME/.claude/settings.local.json"
+SETTINGS_FILE="$HOME/.claude/settings.json"
 
 echo "  Removing Claude Code hooks..."
 
@@ -21,7 +21,7 @@ import os
 import shutil
 from pathlib import Path
 
-settings_file = Path(os.path.expanduser("~/.claude/settings.local.json"))
+settings_file = Path(os.path.expanduser("~/.claude/settings.json"))
 
 if not settings_file.exists():
     print("  No settings file found — nothing to do.")
@@ -48,8 +48,11 @@ removed_count = 0
 
 def is_pet_hook(entry: dict) -> bool:
     """Check if a hook entry belongs to claude-pet."""
-    cmd = entry.get("command", "")
-    return "claude-pet" in cmd and "state-hook.sh" in cmd
+    for h in entry.get("hooks", []):
+        cmd = h.get("command", "")
+        if "claude-pet" in cmd and "state-hook.sh" in cmd:
+            return True
+    return False
 
 for event_name in list(hooks.keys()):
     if not isinstance(hooks[event_name], list):

@@ -1,15 +1,15 @@
 #!/bin/bash
 # Install Claude Pet hooks into Claude Code settings.
 #
-# Adds hook entries to ~/.claude/settings.local.json so Claude Code
-# calls state-hook.sh on tool-use and stop events.
+# Adds hook entries to ~/.claude/settings.json so Claude Code
+# calls state-hook.sh on session, prompt, permission, stop, and compact events.
 #
 # Safe to run multiple times — existing hooks are preserved and
 # claude-pet hooks are only added if not already present.
 
 set -e
 
-SETTINGS_FILE="$HOME/.claude/settings.local.json"
+SETTINGS_FILE="$HOME/.claude/settings.json"
 SETTINGS_DIR="$HOME/.claude"
 HOOK_SCRIPT="$(cd "$(dirname "$0")" && pwd)/state-hook.sh"
 
@@ -26,33 +26,81 @@ import shutil
 import sys
 from pathlib import Path
 
-settings_file = Path(os.path.expanduser("~/.claude/settings.local.json"))
+settings_file = Path(os.path.expanduser("~/.claude/settings.json"))
 hook_script = Path("$HOOK_SCRIPT")
 
-# The hooks we want to install
+# The hooks we want to install (new format with "hooks" array and "type": "command")
 pet_hooks = {
+    "SessionStart": [
+        {
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"{hook_script} idle",
+                    "timeout": 5
+                }
+            ]
+        }
+    ],
+    "UserPromptSubmit": [
+        {
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"{hook_script} thinking",
+                    "timeout": 5
+                }
+            ]
+        }
+    ],
     "PreToolUse": [
         {
             "matcher": "",
-            "command": f"{hook_script} working"
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"{hook_script} working",
+                    "timeout": 5
+                }
+            ]
         }
     ],
-    "PostToolUse": [
+    "PermissionRequest": [
         {
             "matcher": "",
-            "command": f"{hook_script} thinking"
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"{hook_script} attention",
+                    "timeout": 5
+                }
+            ]
         }
     ],
     "Stop": [
         {
             "matcher": "",
-            "command": f"{hook_script} attention"
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"{hook_script} celebrating",
+                    "timeout": 5
+                }
+            ]
         }
     ],
-    "Notification": [
+    "PreCompact": [
         {
             "matcher": "",
-            "command": f"{hook_script} attention"
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"{hook_script} doubling",
+                    "timeout": 5
+                }
+            ]
         }
     ],
 }
@@ -83,8 +131,11 @@ hooks = settings["hooks"]
 
 def is_pet_hook(entry: dict) -> bool:
     """Check if a hook entry belongs to claude-pet."""
-    cmd = entry.get("command", "")
-    return "claude-pet" in cmd and "state-hook.sh" in cmd
+    for h in entry.get("hooks", []):
+        cmd = h.get("command", "")
+        if "claude-pet" in cmd and "state-hook.sh" in cmd:
+            return True
+    return False
 
 for event_name, new_entries in pet_hooks.items():
     if event_name not in hooks:

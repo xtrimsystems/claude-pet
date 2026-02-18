@@ -4,16 +4,16 @@ Claude Bridge - Monitors Claude Code state via a shared state file.
 Claude Code hooks write state strings (e.g., "working", "thinking") to a file,
 and the pet app polls that file to drive animations.
 
-Valid states: "idle", "thinking", "working", "attention", "celebrating", "error"
+Valid states: "idle", "thinking", "working", "attention", "celebrating", "doubling"
 """
 
 import os
 import time
 
-VALID_STATES = {"idle", "thinking", "working", "attention", "celebrating", "error", "doubling"}
+VALID_STATES = {"idle", "thinking", "working", "attention", "celebrating", "doubling"}
 DEFAULT_STATE = "idle"
 POLL_INTERVAL_MS = 300
-IDLE_TIMEOUT_S = 30
+IDLE_TIMEOUT_S = 60
 
 
 class ClaudeBridge:
@@ -155,6 +155,11 @@ class ClaudeBridge:
         _reset_idle_timeout will create a fresh one on the next state change.
         """
         if not self._watching:
+            return False
+
+        if self.current_state == "attention":
+            # Attention persists until a real state change (user handles permission)
+            self._reset_idle_timeout()
             return False
 
         if self.current_state != DEFAULT_STATE:

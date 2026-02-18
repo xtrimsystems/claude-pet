@@ -2,7 +2,7 @@
 
 An animated desktop companion for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). A transparent, always-on-top pixel art character that reflects the current state of your Claude Code session — thinking, working, waiting for input, celebrating, or erroring out.
 
-Uses the [Shimeji-ee](https://kilkakon.com/shimeji/) / [Shijima-Qt](https://getshijima.app) sprite format, so you can use any compatible mascot pack.
+Uses the [Shimeji-ee](https://kilkakon.com/shimeji/) / [Shijima-Qt](https://getshijima.app) sprite format. Standard Shimeji mascot packs will partially work out of the box — basic movement animations (walking, climbing, sitting, falling, dragging) use standard sprite indices. However, Claude-specific state animations (working, celebrating, thinking, error, doubling) use higher sprite indices (38-50) that don't exist in most packs. Missing sprites fall back to the first available frame, so the pet still functions — it just won't have distinct animations for those states. To get the full experience, you can add custom sprites to the pack at those indices (see the sprite mapping in [CLAUDE.md](CLAUDE.md)).
 
 ## Features
 
@@ -62,12 +62,14 @@ Claude Pet installs hooks into Claude Code that write state changes to a file. T
 
 | Claude Code Event | Pet State |
 |---|---|
-| Tool use starts | Working (active animation) |
-| Tool use completes | Thinking (contemplative) |
-| Session stops / needs input | Attention (alert) |
-| Idle for 30s | Idle (wandering around) |
+| User sends prompt | Thinking |
+| Tool use starts | Working |
+| Permission needed | Attention |
+| Session stops | Celebrating (then idle) |
+| Context compaction | Doubling (clone-kill animation) |
+| Idle for 60s | Idle (wandering around) |
 
-When idle, the pet wanders the screen Shimeji-style — walking along edges, climbing walls, sitting, jumping.
+When idle, the pet wanders the screen Shimeji-style — walking along edges, climbing walls, sitting, kicking, jumping.
 
 ## Acknowledgments
 
