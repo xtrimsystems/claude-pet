@@ -51,6 +51,7 @@ if [ "$1" = "stop" ]; then
         rm -f "$PID_FILE"
     fi
     rm -f "$STATE_FILE"
+    rm -f "/tmp/claude-pet-${PROJECT_HASH}-pos"
     exit 0
 fi
 

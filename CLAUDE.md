@@ -4,18 +4,19 @@ Shimeji-style desktop pet for Claude Code. A transparent, always-on-top GTK3 win
 
 ## Architecture
 
-4 Python files, no build system (runs directly with system python3):
+5 Python files, no build system (runs directly with system python3):
 
-- **main.py** - Entry point. Parses args (`--project-name`, `--pid-file`, `--state-file`, etc.), loads config from `~/.config/claude-pet/config.json`, resolves mascot path, creates `SpriteCharacter` + `ClaudeBridge` + `PetWindow`, starts GTK main loop. Per-project single-instance via PID files at `/tmp/claude-pet-{hash}.pid`.
-- **pet_window.py** - The core. Contains `PetWindow` (GTK POPUP window), `WanderEngine` (movement AI), and `CloneWindow` (temporary overlay for clone-kill animation). Runs at 60fps via GLib timer.
+- **main.py** - Entry point. Parses args (`--size`, `--mascot`, `--state-file`, `--pid-file`, `--project-name`, `--debug`), loads config from `~/.config/claude-pet/config.json`, resolves mascot path, creates `SpriteCharacter` + `ClaudeBridge` + `SocialEngine` + `PetWindow`, starts GTK main loop. Per-project single-instance via PID files at `/tmp/claude-pet-{hash}.pid`. Pets spawn at a random X along the bottom of the primary monitor.
+- **pet_window.py** - The core. Contains `PetWindow` (GTK POPUP window), `WanderEngine` (movement AI), and `CloneWindow` (temporary overlay for clone-kill animation). Runs at 60fps via GLib timer. Integrates social directives from `SocialEngine`.
 - **sprite_character.py** - Loads shime*.png sprites from mascot directories. Defines two animation config dicts: `_state_config` (Claude states) and `_move_config` (movement animations). Handles frame advancement, looping, and state transitions.
 - **claude_bridge.py** - Polls the state file (per-project: `/tmp/claude-pet-{hash}-state`) every 300ms for state changes. Has a 60-second idle timeout that auto-transitions to idle if no state change occurs. Valid states: idle, thinking, working, attention, celebrating, doubling.
+- **social_engine.py** - Inter-process social behaviors. Pets share position via `/tmp/claude-pet-{hash}-pos` files and use that data to avoid sitting near each other, face nearby peers, and fight.
 
 ## Animation System (sprite_character.py)
 
 ### Two config dicts drive all animations:
 
-**`_state_config`** - State-override animations (thinking, working, celebrating, error, etc.). Triggered by Claude hooks or wander engine. Freeze movement and take priority over move animations.
+**`_state_config`** - State-override animations (thinking, working, celebrating, error, etc.). Triggered by Claude hooks, social engine, or wander engine. Freeze movement and take priority over move animations.
 **`_move_config`** - Movement animations (walk, sit, climb, kick, jump, fall, drag, etc.)
 
 ### Config format:
@@ -31,7 +32,7 @@ Shimeji-style desktop pet for Claude Code. A transparent, always-on-top GTK3 win
 
 ### Loop behavior:
 - **`"loop": True`** (default if omitted) - loops **forever** until state changes externally. Used for ongoing states: idle, thinking, working, attention.
-- **`"loop": False`** - plays a **finite number of times** (controlled by `"loops"`, default 2), then auto-transitions to `"next"` state. Used for one-shot animations: celebrating, error, doubling, clone_dying.
+- **`"loop": False`** - plays a **finite number of times** (controlled by `"loops"`, default 2), then auto-transitions to `"next"` state. Used for one-shot animations: celebrating, error, doubling, stumble.
 - The `"loops"` default of 2 is set in `tick()` line 220: `cfg.get("loops", 2)`.
 
 ### Animation priority (in `_active_config()`):
@@ -40,7 +41,7 @@ Shimeji-style desktop pet for Claude Code. A transparent, always-on-top GTK3 win
 3. If Claude state IS "idle" AND no movement -> plays static `_state_config["idle"]`
 
 ### Movement freezing:
-When Claude state is working, thinking, error, attention, doubling, clone_frozen, or clone_dying, the `WanderEngine.tick()` returns current position without moving (line 197-200 of pet_window.py). The pet stays put while these animations play.
+When Claude state is working, thinking, error, attention, doubling, clone_frozen, stumble, or attack, the `WanderEngine.tick()` returns current position without moving. The pet stays put while these animations play.
 
 ## State Triggering - Three Sources
 
@@ -70,11 +71,12 @@ Note: PostToolUse and PostToolUseFailure are intentionally not hooked — they f
 
 ### 3. Wander engine random behaviors (pet_window.py `WanderEngine._pick_behavior`)
 - During idle, the wander engine randomly picks behaviors using weighted probabilities.
-- Besides movement (sit, walk, climb, kick, jump), it can also pick: **clone_kill, celebrating, error, thinking**.
+- Besides movement (sit, walk, climb, kick, jump), it can also pick: **clone_kill, error**.
 - These are set as `pending_anim` on the wander engine, then picked up by `_on_frame_tick` and applied via `set_state()`.
 - Weights differ between calm mode (default) and active mode (--debug flag):
-  - Calm: sit=200, walk=50, climb=10, kick=6, jump=2, clone_kill=2, celebrating=3, error=2, thinking=5
-  - Active: sit=50, walk=150, climb=40, kick=18, jump=7, clone_kill=5, celebrating=8, error=5, thinking=10
+  - Calm: sit=200, walk=50, climb=10, kick=6, jump=2, clone_kill=2, error=2
+  - Active: sit=50, walk=150, climb=40, kick=18, jump=7, clone_kill=5, error=5
+- **Stumble**: Random chance per frame while walking on the ground. Base ~0.03% per frame (~2%/s), boosted to ~0.3% per frame (~16%/s) when another pet is very close (within half a sprite width). Interrupts the walk mid-stride with the stumble animation [19, 18, 20], then returns to idle.
 
 ## Sprite Mapping (Deadpool mascot, current)
 
@@ -88,7 +90,7 @@ Note: PostToolUse and PostToolUseFailure are intentionally not hooked — they f
 | 12-14 | Climbing |
 | 15 | Action pose (used in attention) |
 | 1 | Good landing (standing pose after kick/jump) |
-| 18-21 | Bad landing / hard landing / clone death |
+| 18, 20-21 | Bad landing / hard landing / clone death |
 | 22 | Jump (big jump sprite) |
 | 23-25 | Ceiling walk |
 | 37 | Kick (small jump / air kick sprite) |
@@ -96,6 +98,7 @@ Note: PostToolUse and PostToolUseFailure are intentionally not hooked — they f
 | 42-43 | Thinking animation / error bookend |
 | 44-46 | Doubling (clone spawn) animation |
 | 47-48 | Working animation (at laptop) |
+| 27-29 | Attack animation (used in clone-kill and fights) |
 | 49-50 | Celebrating animation |
 
 ## Clone-Kill Animation Sequence
@@ -103,8 +106,51 @@ Note: PostToolUse and PostToolUseFailure are intentionally not hooked — they f
 1. `set_state("doubling")` -> plays sprites [44, 45, 46] once, transitions to "clone_frozen"
 2. `_on_frame_tick` detects doubling->clone_frozen transition -> calls `_spawn_clone()`
 3. `CloneWindow` spawns behind original, plays attack sprites [27, 28, 29], calls `_on_clone_done`
-4. Original plays "clone_dying" [19, 18, 20], then after 900ms `_on_clone_death_done` swaps positions
+4. Original plays "stumble" [19, 18, 20], then after 900ms `_on_clone_death_done` swaps positions
 5. Original teleports to clone position, clone window destroyed, state returns to idle
+
+## Social Behaviors (social_engine.py)
+
+When multiple pet instances are running, they interact via position files.
+
+### Position Sharing
+
+Each pet writes its position to `/tmp/claude-pet-{hash}-pos` every 10 frames (~166ms). Format: CSV line with `x,y,width,height,facing,state,move_state,monitor_idx,fight_target,timestamp`. Written atomically via temp file + `os.rename()`. Peers are read every 300ms; entries older than 3 seconds are discarded.
+
+### No Sitting Near Others
+
+When a walking pet is near a peer on the same monitor (within `1.5 * pet_size`), `_pick_behavior()` excludes SIT from its weighted random selection. The already-sitting pet stays put; the walking one avoids sitting down. Implemented via a `block_sit` flag in the `SocialDirective`.
+
+### Face Each Other
+
+When sitting and the nearest peer on the same monitor is within `3 * pet_size`, the sitting pet's facing direction is overridden toward the peer. Only applies during the SIT movement state.
+
+### Fight
+
+**Trigger:** Two idle pets both walking on ground, within `0.6 * pet_size` (sprites nearly touching), random ~1% chance per second. 10-second cooldown between fights.
+
+**Protocol — two-way handshake (via `fight_target` field in position file):**
+1. Pet A writes `fight_target=B_hash` in its position file (proposal)
+2. Pet B reads the proposal, checks it's close/idle/walking, writes `fight_target=A_hash` back (counter-proposal)
+3. Both pets read the mutual targeting — handshake complete. Re-checks proximity at confirmation time
+4. Smaller hash = attacker, larger hash = defender
+5. Fight directives are delivered exactly once (`_fight_delivered` flag prevents re-triggering)
+6. Stale proposals expire after 3 seconds (`FIGHT_PROPOSAL_TTL`)
+
+This ensures fights never happen one-sided — both pets must agree and be close.
+
+**Attacker:** plays `attack` state [27, 28, 29] -> transitions to `celebrating` [49, 50]. Fight clears on the attack->celebrating transition.
+
+**Defender:** facing flipped away from attacker, receives a small shove via `_start_throw(vx, vy)` (vx ~2-3, vy ~-1). Existing throw physics handles the rest. Fight clears after a 2-second timer.
+
+The `"attack"` state in `_state_config`:
+```python
+"attack": {"sprites": [27, 28, 29], "delay": 200, "loop": False, "loops": 1, "next": "celebrating"}
+```
+
+### Cleanup
+
+Position files are removed on shutdown (`social.cleanup()` in `PetWindow._cleanup` and `main.py`), by `state-hook.sh` on SessionEnd, and by `make stop`.
 
 ## Multi-Instance Support
 
@@ -114,7 +160,7 @@ Each Claude Code session spawns its own pet, identified by project folder:
 - Per-project files: `/tmp/claude-pet-{hash}-state` and `/tmp/claude-pet-{hash}.pid`
 - `main.py` accepts `--project-name`, `--pid-file`, `--state-file` args
 - `SessionEnd` hook kills the pet for that specific project
-- `make stop` kills all pet instances (globs `/tmp/claude-pet*.pid`)
+- `make stop` kills all pet instances (globs `/tmp/claude-pet*.pid`) and removes position files
 
 ## Project Name Label
 
@@ -145,6 +191,7 @@ make run          # foreground
 make debug        # with debug logging (activates "active" wander mode)
 make start        # background
 make stop         # kill all pet instances
+make test-pet     # spawn a test pet with random NATO name (debug mode)
 make test-states  # cycle through all states
 make test-working # set a specific state
 make install      # install hooks + launcher
@@ -152,3 +199,7 @@ make uninstall    # remove hooks
 ```
 
 No Docker needed - this uses system python3 with python3-gi (PyGObject) and python3-gi-cairo.
+
+## Documentation Policy
+
+When making changes that affect behavior, flags, architecture, or features, **always update both CLAUDE.md and README.md** in the same change. Keep them in sync with the code.

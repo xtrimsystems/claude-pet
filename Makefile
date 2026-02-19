@@ -1,4 +1,6 @@
-.PHONY: run stop install uninstall test-states clean help
+.PHONY: run stop install uninstall test-states test-pet clean help
+
+NAMES = alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango
 
 # Default: run the pet
 run:
@@ -21,6 +23,7 @@ stop:
 		fi; \
 		rm -f "$$pidfile"; \
 	done; \
+	rm -f /tmp/claude-pet-*-pos; \
 	$$found || echo "Claude Pet not running"
 
 # Run with debug logging
@@ -34,6 +37,16 @@ install:
 # Uninstall hooks
 uninstall:
 	bash uninstall.sh
+
+# Spawn a test pet with a random NATO name
+test-pet:
+	@name=$$(echo $(NAMES) | tr ' ' '\n' | shuf -n1); \
+	hash=$$(echo "$$name-$$$$" | md5sum | cut -c1-8); \
+	echo "Spawning test pet: $$name ($$hash)"; \
+	python3 main.py --debug \
+		--state-file /tmp/claude-pet-$$hash-state \
+		--pid-file /tmp/claude-pet-$$hash.pid \
+		--project-name $$name &
 
 # Test: cycle through all states (useful for development)
 test-states:
@@ -59,5 +72,6 @@ help:
 	@echo "  make debug         Run with debug logging"
 	@echo "  make install       Install hooks and setup"
 	@echo "  make uninstall     Remove hooks"
+	@echo "  make test-pet      Spawn a test pet (random name)"
 	@echo "  make test-states   Cycle through all states"
 	@echo "  make test-STATE    Set a specific state (e.g., make test-attention)"

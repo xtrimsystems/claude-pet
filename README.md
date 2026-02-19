@@ -10,6 +10,7 @@ Uses the [Shimeji-ee](https://kilkakon.com/shimeji/) / [Shijima-Qt](https://gets
 - Shimeji-style wandering: walks, climbs screen edges, sits, jumps, falls
 - Drag and throw with physics simulation
 - Multi-monitor support
+- **Social behaviors**: multiple pets interact — they face each other when sitting nearby, avoid sitting next to each other, and occasionally fight (attacker plays attack animation, defender gets shoved back)
 - Right-click context menu for manual state control, scaling, and special actions
 - Auto-starts when Claude Code runs (via hooks)
 - Works on X11 with a compositor (picom, compton, etc.)
@@ -49,11 +50,12 @@ for_window [title="Claude Pet"] floating enable, border none, sticky enable
 ## Options
 
 ```
---size SIZE        Window size in pixels (default: 128)
---mascot PATH      Path to mascot directory with shime*.png sprites
---position POS     Starting position: top-left, top-right, bottom-left, bottom-right, center
---state-file PATH  Path to state file (default: /tmp/claude-pet-state)
---debug            Enable debug logging
+--size SIZE              Window size in pixels (default: 128)
+--mascot PATH            Path to mascot directory with shime*.png sprites
+--state-file PATH        Path to state file (default: /tmp/claude-pet-state)
+--pid-file PATH          Path to PID file (default: /tmp/claude-pet.pid)
+--project-name NAME      Project name to display near the sprite
+--debug                  Enable debug logging
 ```
 
 ## How It Works
@@ -69,7 +71,14 @@ Claude Pet installs hooks into Claude Code that write state changes to a file. T
 | Context compaction | Doubling (clone-kill animation) |
 | Idle for 60s | Idle (wandering around) |
 
-When idle, the pet wanders the screen Shimeji-style — walking along edges, climbing walls, sitting, kicking, jumping.
+When idle, the pet wanders the screen Shimeji-style — walking along edges, climbing walls, sitting, kicking, jumping. When multiple Claude Code sessions are active, their pets interact: they face each other when sitting nearby, avoid crowding, and occasionally pick fights.
+
+You can spawn test pets to see social behaviors in action:
+
+```bash
+make test-pet   # run multiple times to spawn several pets
+make stop       # kill them all
+```
 
 ## Acknowledgments
 

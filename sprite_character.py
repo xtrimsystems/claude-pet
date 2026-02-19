@@ -92,12 +92,19 @@ class SpriteCharacter:
                 "sprites": [43],
                 "delay": 500,
             },
-            "clone_dying": {
+            "stumble": {
                 "sprites": [19, 18, 20],
                 "delay": 300,
                 "loop": False,
                 "loops": 1,
                 "next": "idle",
+            },
+            "attack": {
+                "sprites": [27, 28, 29],
+                "delay": 200,
+                "loop": False,
+                "loops": 1,
+                "next": "celebrating",
             },
         }
 
@@ -156,16 +163,16 @@ class SpriteCharacter:
                 "delay": 200,
             },
             "bad_land": {
-                "sprites": [18, 19],
-                "delay": 250,
+                "sprites": [18],
+                "delay": 500,
             },
             "good_land": {
                 "sprites": [1],
                 "delay": 500,
             },
             "hard_land": {
-                "sprites": [18, 20, 21, 21, 19],
-                "delay": 200,
+                "sprites": [18, 20, 20, 21, 21],
+                "delay": 250,
             },
         }
 

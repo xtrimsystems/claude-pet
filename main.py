@@ -18,11 +18,10 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk  # noqa: E402
 
 from claude_bridge import ClaudeBridge  # noqa: E402
-from pet_window import PetWindow  # noqa: E402
+from pet_window import LABEL_HEIGHT, PetWindow  # noqa: E402
 
 logger = logging.getLogger("claude-pet")
 
-VALID_POSITIONS = ("top-left", "top-right", "bottom-left", "bottom-right", "center")
 DEFAULT_SPRITES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sprites")
 CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "claude-pet")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
@@ -45,13 +44,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default="/tmp/claude-pet-state",
         help="Path to the state file (default: /tmp/claude-pet-state)",
-    )
-    parser.add_argument(
-        "--position",
-        type=str,
-        default="bottom-right",
-        choices=VALID_POSITIONS,
-        help="Starting screen position (default: bottom-right)",
     )
     parser.add_argument(
         "--debug",
@@ -148,15 +140,30 @@ def main() -> None:
     write_pid(args.pid_file)
 
     logger.info(
-        "Starting Claude Pet: size=%d, position=%s, state_file=%s, pid_file=%s, project=%s",
+        "Starting Claude Pet: size=%d, state_file=%s, pid_file=%s, project=%s",
         args.size,
-        args.position,
         args.state_file,
         args.pid_file,
         args.project_name or "(default)",
     )
 
     bridge = ClaudeBridge(state_file=args.state_file)
+
+    # Extract project hash from state file path for social engine
+    # State file format: /tmp/claude-pet-{hash}-state
+    social_engine = None
+    state_base = os.path.basename(args.state_file)
+    if state_base.startswith("claude-pet-") and state_base.endswith("-state"):
+        project_hash = state_base[len("claude-pet-"):-len("-state")]
+        if project_hash:
+            from social_engine import SocialEngine
+            social_engine = SocialEngine(
+                my_hash=project_hash,
+                pet_size=args.size,
+                pet_height=args.size + (LABEL_HEIGHT if args.project_name else 0),
+            )
+            logger.info("Social engine enabled (hash=%s)", project_hash)
+
     config = load_config()
 
     # Resolve mascot path: explicit --mascot > saved config > first in sprites/
@@ -188,15 +195,17 @@ def main() -> None:
         character=character,
         bridge=bridge,
         size=args.size,
-        position=args.position,
         debug=args.debug,
         sprites_dir=DEFAULT_SPRITES_DIR,
         mascot_path=mascot_path,
         project_name=args.project_name,
+        social_engine=social_engine,
     )
     window.show_all()
 
     Gtk.main()
+    if social_engine:
+        social_engine.cleanup()
     remove_pid(args.pid_file)
     logger.info("Claude Pet shut down")
 

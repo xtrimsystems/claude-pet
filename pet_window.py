@@ -78,7 +78,8 @@ class WanderEngine:
       - **active** (--debug): moves frequently, great for testing.
     """
 
-    WALK_SPEED = 1              # px/frame @60fps (~42 px/sec)
+    WALK_SPEED_MIN = 0.6        # px/frame @60fps
+    WALK_SPEED_MAX = 1.4        # px/frame @60fps
     CLIMB_SPEED = 0.8           # px/frame @60fps (~48 px/sec)
     FALL_SPEED_INIT = 1.5       # px/frame initial fall
     FALL_ACCEL = 0.35           # px/frame² gravity @60fps (heavy)
@@ -94,8 +95,10 @@ class WanderEngine:
     # Behavior weights (higher = more likely to be chosen)
     #   sit:   stay put          walk:  walk on ground
     #   climb: climb nearest edge
-    CALM_WEIGHTS   = {"sit": 200, "walk": 50, "climb": 10, "kick": 6, "jump": 2, "clone_kill": 2, "celebrating": 3, "error": 2, "thinking": 5}
-    ACTIVE_WEIGHTS = {"sit":  50, "walk": 150, "climb": 40, "kick": 18, "jump": 7, "clone_kill": 5, "celebrating": 8, "error": 5, "thinking": 10}
+    CALM_WEIGHTS   = {"sit": 200, "walk": 50, "climb": 10, "kick": 6, "jump": 2, "clone_kill": 2, "error": 2}
+    ACTIVE_WEIGHTS = {"sit":  50, "walk": 150, "climb": 40, "kick": 18, "jump": 7, "clone_kill": 5, "error": 5}
+    STUMBLE_CHANCE = 0.0003      # per frame while walking (~2% per second)
+    STUMBLE_CHANCE_CLOSE = 0.003  # per frame when another pet is very close (~16% per second)
 
     # Sit durations (frames at 60 fps)
     CALM_SIT   = (600, 2400)   # 10–40 s
@@ -116,6 +119,8 @@ class WanderEngine:
         self._pet_height = pet_height or pet_size
         self._margin = margin
         self.active_mode = active
+        self._social_block_sit = False  # set by PetWindow from social directive
+        self._social_peer_nearby = False  # True when another pet is very close
 
         # Start on primary monitor (index 0)
         self._active_idx = 0
@@ -127,6 +132,7 @@ class WanderEngine:
         self.move_state = Move.SIT   # start sitting
         self._sit_timer = random.randint(300, 900)  # 5–15 s initial sit
         self._walk_timer = 0
+        self._walk_speed = random.uniform(self.WALK_SPEED_MIN, self.WALK_SPEED_MAX)
         self._fall_speed = 0.0
         self._land_timer = 0
         self._throw_vx = 0.0
@@ -163,8 +169,10 @@ class WanderEngine:
 
     # --- behavior selection (Shimeji-style weighted random) ---
 
-    def _pick_behavior(self) -> Move:
-        weights = self.ACTIVE_WEIGHTS if self.active_mode else self.CALM_WEIGHTS
+    def _pick_behavior(self, block_sit: bool = False) -> Move:
+        weights = dict(self.ACTIVE_WEIGHTS if self.active_mode else self.CALM_WEIGHTS)
+        if block_sit:
+            weights.pop("sit", None)
         total = sum(weights.values())
         roll = random.random() * total
         cumulative = 0.0
@@ -186,7 +194,7 @@ class WanderEngine:
                     return Move.KICK
                 elif behavior == "jump":
                     return Move.JUMP
-                elif behavior in ("clone_kill", "celebrating", "error", "thinking"):
+                elif behavior in ("clone_kill", "error"):
                     return behavior
         return Move.SIT
 
@@ -200,7 +208,8 @@ class WanderEngine:
 
     def tick(self, anim_state: str) -> tuple[int, int]:
         if anim_state in ("working", "thinking", "error", "attention",
-                          "doubling", "clone_frozen", "clone_dying", "celebrating"):
+                          "doubling", "clone_frozen", "stumble",
+                          "celebrating", "attack"):
             return int(self.x), int(self.y)
 
         if self.move_state == Move.WALK_GROUND:
@@ -236,7 +245,14 @@ class WanderEngine:
 
     def _do_walk_ground(self) -> None:
         self.y = self.y_max
-        self.x += self.WALK_SPEED * self.direction
+        self.x += self._walk_speed * self.direction
+
+        # Random stumble while walking (more likely when another pet is very close)
+        chance = self.STUMBLE_CHANCE_CLOSE if self._social_peer_nearby else self.STUMBLE_CHANCE
+        if random.random() < chance:
+            self.pending_anim = "stumble"
+            self._start_sit()
+            return
 
         # Hit an edge?
         if self.x <= self.x_min:
@@ -254,7 +270,7 @@ class WanderEngine:
 
     def _do_walk_top(self) -> None:
         self.y = self.y_min
-        self.x += self.WALK_SPEED * self.direction
+        self.x += self._walk_speed * self.direction
 
         if self.x <= self.x_min:
             self.x = self.x_min
@@ -309,10 +325,10 @@ class WanderEngine:
         # Hard land if fell more than 40% of screen height
         if fall_dist > screen_height * 0.4:
             self.move_state = Move.HARD_LAND
-            self._land_timer = 43
+            self._land_timer = 66
         else:
             self.move_state = Move.BAD_LAND
-            self._land_timer = 20
+            self._land_timer = 30     # 1 frame × 500ms delay
 
     def _do_land(self) -> None:
         self._land_timer -= 1
@@ -335,8 +351,8 @@ class WanderEngine:
 
     def _transition(self) -> None:
         """Pick the next behavior using weighted random selection."""
-        nxt = self._pick_behavior()
-        if nxt in ("clone_kill", "celebrating", "error", "thinking"):
+        nxt = self._pick_behavior(block_sit=self._social_block_sit)
+        if nxt in ("clone_kill", "error"):
             self.pending_anim = nxt
             self._start_sit()
         elif nxt == Move.SIT:
@@ -360,6 +376,7 @@ class WanderEngine:
     def _start_walk(self) -> None:
         self.move_state = Move.WALK_GROUND
         self.direction = random.choice([-1, 1])
+        self._walk_speed = random.uniform(self.WALK_SPEED_MIN, self.WALK_SPEED_MAX)
         lo, hi = self._walk_range()
         self._walk_timer = random.randint(lo, hi)
 
@@ -609,22 +626,22 @@ class PetWindow(Gtk.Window):
         character: CharacterProto,
         bridge: ClaudeBridgeProto,
         size: int = 192,
-        position: str = "bottom-right",
         debug: bool = False,
         sprites_dir: str | None = None,
         mascot_path: str | None = None,
         project_name: str | None = None,
+        social_engine: object | None = None,
     ) -> None:
         super().__init__(type=Gtk.WindowType.POPUP)
 
         self.character = character
         self.bridge = bridge
         self._size = size
-        self._position = position
         self._debug = debug
         self._sprites_dir = sprites_dir
         self._mascot_path = mascot_path
         self._project_name = project_name
+        self._social = social_engine
         self._label_height = LABEL_HEIGHT if project_name else 0
 
         self._drag_active = False
@@ -652,6 +669,8 @@ class PetWindow(Gtk.Window):
         self._label_on_top: bool = True
         self._clone_window: CloneWindow | None = None
         self._clone_falling: bool = False
+        self._last_social_directive = None
+        self._pending_throw: tuple[float, float] | None = None
 
         self._setup_window()
         self._setup_drawing()
@@ -719,25 +738,9 @@ class PetWindow(Gtk.Window):
 
     def _place_on_screen(self) -> None:
         geom = self._get_primary_monitor_geometry()
-        edge_offset = 50
-        x, y = geom.x, geom.y
-
-        if self._position == "top-left":
-            x += edge_offset
-            y += edge_offset
-        elif self._position == "top-right":
-            x += geom.width - self._size - edge_offset
-            y += edge_offset
-        elif self._position == "bottom-left":
-            x += edge_offset
-            y += geom.height - self._size - self._label_height - edge_offset
-        elif self._position == "center":
-            x += (geom.width - self._size) // 2
-            y += (geom.height - self._size - self._label_height) // 2
-        else:
-            x += geom.width - self._size - edge_offset
-            y += geom.height - self._size - self._label_height - edge_offset
-
+        margin = 50
+        x = random.randint(geom.x + margin, geom.x + geom.width - self._size - margin)
+        y = geom.y + geom.height - self._size - self._label_height - margin
         self.move(x, y)
         logger.debug("Window placed at (%d, %d)", x, y)
 
@@ -790,6 +793,11 @@ class PetWindow(Gtk.Window):
                 self._manual_override = False
                 logger.debug("Manual override cleared (animation finished)")
 
+        # Clear social fight when attack -> celebrating transition happens
+        if prev_state == "attack" and self.character.state == "celebrating":
+            if self._social:
+                self._social.clear_fight()
+
         # Detect doubling finished → spawn clone
         if (prev_state == "doubling"
                 and self.character.state == "clone_frozen"
@@ -820,6 +828,20 @@ class PetWindow(Gtk.Window):
                     move = "drag_right_fast"
             self.character.set_movement(move, -1)
 
+        # Social engine: write position every N frames
+        if self._social and self._wander is not None:
+            move_name = {
+                Move.SIT: "sit", Move.WALK_GROUND: "walk",
+                Move.WALK_TOP: "walk", Move.CLIMB_LEFT: "climb",
+                Move.CLIMB_RIGHT: "climb", Move.FALL: "fall",
+                Move.THROW: "fall",
+            }.get(self._wander.move_state, "")
+            self._social.write_position(
+                self._wander.x, self._wander.y,
+                self._wander.direction, self.character.state,
+                move_name, self._wander._active_idx,
+            )
+
         # Move unless dragging, wander disabled, or character is busy
         if (self._wander_enabled
                 and not self._drag_active
@@ -827,6 +849,47 @@ class PetWindow(Gtk.Window):
                 and not self.character.is_busy
                 and self._wander is not None):
             new_x, new_y = self._wander.tick(self.character.state)
+
+            # Social engine: get directive for social behaviors
+            social_directive = None
+            self._last_social_directive = None
+            if self._social and self.character.state == "idle":
+                move_name = {
+                    Move.SIT: "sit", Move.WALK_GROUND: "walk",
+                    Move.WALK_TOP: "walk",
+                }.get(self._wander.move_state, "")
+                social_directive = self._social.tick(
+                    self._wander.x, self._wander.y,
+                    self._wander.direction, self.character.state,
+                    self._wander._active_idx, move_name,
+                )
+                # Handle fight directives
+                if social_directive.fight_role == "attacker":
+                    self._manual_override = True
+                    # Face toward the defender
+                    if social_directive.fight_peer_x > self._wander.x:
+                        self._wander.direction = 1
+                    else:
+                        self._wander.direction = -1
+                    self.character.set_state("attack")
+                elif social_directive.fight_role == "defender":
+                    # Face toward the attacker first (see the hit coming)
+                    if social_directive.fight_peer_x > self._wander.x:
+                        self._wander.direction = 1
+                        throw_dir = -1
+                    else:
+                        self._wander.direction = -1
+                        throw_dir = 1
+                    # Compute throw to clear proximity zone
+                    from social_engine import SocialEngine
+                    clear_dist = SocialEngine.PROXIMITY_FIGHT * self._size * 1.3
+                    throw_vy = -2.5
+                    air_frames = 2 * abs(throw_vy) / WanderEngine.THROW_GRAVITY
+                    throw_vx = clear_dist / max(air_frames, 1) * throw_dir
+                    # Delayed throw — face attacker briefly, then get shoved
+                    self._pending_throw = (throw_vx, throw_vy)
+                    GLib.timeout_add(250, self._on_fight_throw_start)
+
             # Check if wander wants to trigger a character animation
             # Only apply during idle — don't override bridge states like attention
             if self._wander.pending_anim:
@@ -837,15 +900,23 @@ class PetWindow(Gtk.Window):
                         if self._clone_window is None:
                             self._manual_override = True
                             self.character.set_state("doubling")
-                    elif anim == "thinking":
-                        self.character.set_state(anim)
-                        # Looping state — auto-clear after 3 seconds
-                        if self._wander_anim_timer_id is not None:
-                            GLib.source_remove(self._wander_anim_timer_id)
-                        self._wander_anim_timer_id = GLib.timeout_add(
-                            3000, self._on_wander_anim_timeout)
                     else:
                         self.character.set_state(anim)
+
+            # Store directive for facing override in movement sync
+            self._last_social_directive = social_directive
+
+            # Social: pass flags to wander engine
+            if social_directive and social_directive.block_sit:
+                self._wander._social_block_sit = True
+            else:
+                self._wander._social_block_sit = False
+            # Peer very close = almost overlapping (half a sprite width)
+            if social_directive:
+                self._wander._social_peer_nearby = social_directive.nearest_peer_dist < self._size * 0.5
+            else:
+                self._wander._social_peer_nearby = False
+
             # Shift sprite inside the window to hug screen edges
             # Window stays put, character moves within it
             ms = self._wander.move_state
@@ -892,6 +963,13 @@ class PetWindow(Gtk.Window):
                 facing = 1
             else:
                 facing = self._wander.direction
+
+            # Social: override facing toward peer when sitting
+            if (self._social and move_name == "sit"
+                    and self._last_social_directive
+                    and self._last_social_directive.face_toward is not None):
+                facing = self._last_social_directive.face_toward
+
             self.character.set_movement(move_name, facing)
 
         self._drawing_area.queue_draw()
@@ -1156,6 +1234,24 @@ class PetWindow(Gtk.Window):
         menu.show_all()
         menu.popup_at_pointer(event)
 
+    def _on_fight_throw_start(self) -> bool:
+        """Start the throw after facing the attacker briefly."""
+        if self._wander and hasattr(self, '_pending_throw'):
+            vx, vy = self._pending_throw
+            del self._pending_throw
+            # Flip facing away from attacker (throw direction)
+            self._wander.direction = 1 if vx > 0 else -1
+            self._wander._start_throw(vx, vy)
+            # Clear fight after throw lands
+            GLib.timeout_add(2000, self._on_fight_defend_done)
+        return False
+
+    def _on_fight_defend_done(self) -> bool:
+        """Clear fight state after defender throw lands."""
+        if self._social:
+            self._social.clear_fight()
+        return False
+
     def _on_wander_anim_timeout(self) -> bool:
         self._wander_anim_timer_id = None
         if not self._manual_override:
@@ -1184,6 +1280,9 @@ class PetWindow(Gtk.Window):
         clone_x = win_x - facing * (self._size // 2)  # behind = opposite of facing
         clone_facing = facing  # face toward original
 
+        # Clone has no label — offset y so sprite aligns with main window's sprite
+        clone_y = win_y + (self._label_height if self._label_on_top else 0)
+
         # Attack animation: stand, jump, kick, kick, stand victorious
         self._clone_window = CloneWindow(
             sprites=self.character._sprites,
@@ -1191,7 +1290,7 @@ class PetWindow(Gtk.Window):
             delay=300,
             size=self._size,
             x=clone_x,
-            y=win_y,
+            y=clone_y,
             facing=clone_facing,
             on_done=self._on_clone_done,
         )
@@ -1200,7 +1299,7 @@ class PetWindow(Gtk.Window):
     def _on_clone_done(self, clone_win: CloneWindow) -> None:
         """Clone finished its attack. Original dies in place, clone stays."""
         # Keep clone alive while original plays death animation
-        self.character.set_state("clone_dying")
+        self.character.set_state("stumble")
         # After death sprites finish (3 frames × 300ms = 900ms), swap
         GLib.timeout_add(900, self._on_clone_death_done)
         logger.debug("Clone attack done, original dying")
@@ -1328,6 +1427,8 @@ class PetWindow(Gtk.Window):
             self.bridge.stop_watching()
         except Exception:
             logger.exception("Error stopping bridge")
+        if self._social:
+            self._social.cleanup()
 
     def _on_realize(self, widget: Gtk.Window) -> None:
         """Disable compositor shadow/border on this window."""
