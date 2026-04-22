@@ -65,8 +65,8 @@ class SpriteCharacter:
                 "delay": 600,
             },
             "attention": {
-                "sprites": [11, 15],
-                "delay": 300,
+                "sprites": [51, 51, 52, 53, 52, 53, 51, 51],
+                "delay": 110,
             },
             "celebrating": {
                 "sprites": [49, 50],
