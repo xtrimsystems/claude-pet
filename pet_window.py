@@ -21,6 +21,18 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
+# Raw xlib for z-order control. GTK3's Gdk.Window.raise_() is unreliable on
+# POPUP/override-redirect windows under i3 — it demotes the window in some
+# stacking scenarios. Calling XConfigureWindow(Above) directly via python-xlib
+# bypasses that wrapper and reliably raises the pet above other "keep_above"
+# overlays (like xborder's rainbow overlay).
+try:
+    from Xlib import X as _X
+    from Xlib import display as _xlib_display
+    _XDISPLAY = _xlib_display.Display()
+except Exception:
+    _XDISPLAY = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -554,6 +566,7 @@ class CloneWindow(Gtk.Window):
         self.add(self._da)
 
         self.set_type_hint(Gdk.WindowTypeHint.DOCK)
+        self.set_wmclass("claude-pet", "claude-pet")
         self.connect("realize", self._on_realize)
         self.move(x, y)
         self.show_all()
@@ -663,6 +676,7 @@ class PetWindow(Gtk.Window):
         self._wander_anim_timer_id: int | None = None
 
         self._frame_timer_id: int | None = None
+        self._raise_timer_id: int | None = None
         self._wander: WanderEngine | None = None
         self._draw_offset_x: int = 0
         self._draw_offset_y: int = 0
@@ -703,6 +717,9 @@ class PetWindow(Gtk.Window):
 
         self.set_app_paintable(True)
         self.set_type_hint(Gdk.WindowTypeHint.DOCK)
+        # Distinctive WM_CLASS so external tools (e.g. xborders-rainbow) can
+        # skip drawing overlays on top of the pet.
+        self.set_wmclass("claude-pet", "claude-pet")
         self.connect("realize", self._on_realize)
         self.connect("destroy", self._on_destroy)
 
@@ -776,11 +793,36 @@ class PetWindow(Gtk.Window):
 
     def _start_timers(self) -> None:
         self._frame_timer_id = GLib.timeout_add(FRAME_INTERVAL_MS, self._on_frame_tick)
+        self._raise_timer_id = GLib.timeout_add(500, self._xraise_above)
 
     def _stop_timers(self) -> None:
         if self._frame_timer_id is not None:
             GLib.source_remove(self._frame_timer_id)
             self._frame_timer_id = None
+        if self._raise_timer_id is not None:
+            GLib.source_remove(self._raise_timer_id)
+            self._raise_timer_id = None
+
+    def _xraise_above(self) -> bool:
+        """Raise this window above all other X11 siblings via raw xlib.
+
+        Runs on a 500ms timer so that even overlays launched AFTER the pet
+        can't stack above it for long. Avoids Gtk.Window.present()/raise_()
+        which misbehave on POPUP/override-redirect windows under i3.
+        """
+        if _XDISPLAY is None:
+            return False  # xlib missing — stop timer
+        try:
+            gdk_win = self.get_window()
+            if gdk_win is None:
+                return True  # window not realized yet; try again
+            xid = gdk_win.get_xid()
+            xwin = _XDISPLAY.create_resource_object("window", xid)
+            xwin.configure(stack_mode=_X.Above)
+            _XDISPLAY.flush()
+        except Exception:
+            logger.debug("xraise failed", exc_info=True)
+        return True
 
     def _on_frame_tick(self) -> bool:
         prev_state = self.character.state

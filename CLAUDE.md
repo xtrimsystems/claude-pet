@@ -176,7 +176,7 @@ When `--project-name` is set, a floating label is drawn near the sprite via cair
 
 ## Key Technical Details
 
-- **GTK POPUP window** - bypasses window manager (no tiling in i3). Uses `Gdk.WindowTypeHint.DOCK`.
+- **GTK POPUP window** - bypasses window manager (no tiling in i3). Uses `Gdk.WindowTypeHint.DOCK` and sets `WM_CLASS="claude-pet"`. A 500ms `_xraise_above` timer uses raw python-xlib to call `XConfigureWindow(Above)` on the pet's X11 id — this reliably keeps the pet above other "keep_above" overlays (e.g. xborder-style rainbow borders) regardless of launch order. GTK3's `Gdk.Window.raise_()` wrapper is unreliable for POPUP/override-redirect windows under i3.
 - **60fps frame timer** - `FRAME_INTERVAL_MS = 1000 // 60 = 16ms`. Character `_TICK_MS` matches this.
 - **Sprite fallback** - if a sprite index is missing, falls back to the lowest available sprite number (line 167-175 of sprite_character.py). This means animations work even if a mascot is missing some sprites.
 - **Multi-monitor** - WanderEngine tracks active monitor, switches on drag-drop. Pet is constrained to one monitor at a time.
