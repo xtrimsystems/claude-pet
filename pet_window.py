@@ -115,16 +115,16 @@ class WanderEngine:
     # Behavior weights (higher = more likely to be chosen)
     #   sit:   stay put          walk:  walk on ground
     #   climb: climb nearest edge
-    CALM_WEIGHTS   = {"sit": 200, "walk": 50, "climb": 10, "kick": 6, "jump": 2, "clone_kill": 2, "error": 2}
+    CALM_WEIGHTS   = {"sit": 120, "walk": 80, "climb": 20, "kick": 10, "jump": 4, "clone_kill": 3, "error": 3}
     ACTIVE_WEIGHTS = {"sit":  50, "walk": 150, "climb": 40, "kick": 18, "jump": 7, "clone_kill": 5, "error": 5}
     STUMBLE_CHANCE = 0.0003      # per frame while walking (~2% per second)
 
     # Sit durations (frames at 60 fps)
-    CALM_SIT   = (600, 2400)   # 10–40 s
+    CALM_SIT   = (360, 1500)   # 6–25 s
     ACTIVE_SIT = (180, 480)    # 3–8 s
 
     # Walk durations (frames) — walk for a while, then pick next behavior
-    CALM_WALK   = (120, 360)   # 2–6 s
+    CALM_WALK   = (180, 480)   # 3–8 s
     ACTIVE_WALK = (240, 900)   # 4–15 s
 
     FALL_CHANCE_TOP = 0.0008   # per-frame chance to fall while on ceiling

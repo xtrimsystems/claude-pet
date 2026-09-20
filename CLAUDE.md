@@ -73,7 +73,7 @@ Note: PostToolUse and PostToolUseFailure are intentionally not hooked — they f
 - Besides movement (sit, walk, climb, kick, jump), it can also pick: **clone_kill, error**.
 - These are set as `pending_anim` on the wander engine, then picked up by `_on_frame_tick` and applied via `set_state()`.
 - Weights differ between calm mode (default) and active mode (--debug flag):
-  - Calm: sit=200, walk=50, climb=10, kick=6, jump=2, clone_kill=2, error=2
+  - Calm: sit=120, walk=80, climb=20, kick=10, jump=4, clone_kill=3, error=3
   - Active: sit=50, walk=150, climb=40, kick=18, jump=7, clone_kill=5, error=5
 - **Stumble**: Random chance per frame while walking on the ground. Base ~0.03% per frame (~2%/s), boosted to ~0.3% per frame (~16%/s) when another pet is very close (within half a sprite width). Interrupts the walk mid-stride with the stumble animation [19, 18, 20], then returns to idle.
 
