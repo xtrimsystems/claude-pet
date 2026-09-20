@@ -42,6 +42,8 @@ logger = logging.getLogger(__name__)
 class CharacterProto(Protocol):
     state: str
     frame: int
+    move_state: str
+    facing: int
     is_busy: bool
     _sprites: dict
     _state_config: dict
@@ -599,6 +601,7 @@ class MonitorOverlay(Gtk.Window):
 
         self.sprite = SpriteArea(size)
         self.clone = SpriteArea(size)
+        self.canvas = self._fixed   # stable coordinate space for gestures and popovers
         self._fixed.put(self.sprite, 0, 0)
         self._fixed.put(self.clone, 0, 0)
         self.sprite.set_visible(False)
@@ -799,9 +802,13 @@ class Pet:
             logger.debug("xraise failed", exc_info=True)
         return True
 
+    def _visual_key(self) -> tuple:
+        c = self.character
+        return (c.state, c.frame, c.move_state, c.facing)
+
     def _on_frame_tick(self) -> bool:
         prev_state = self.character.state
-        prev_frame = self.character.frame
+        prev_visual = self._visual_key()
         self.character.tick()
 
         # If a non-looping animation just finished (state changed),
@@ -891,7 +898,7 @@ class Pet:
 
         if moved or self._drag_active:
             self._render()
-        elif prev_state != self.character.state or prev_frame != self.character.frame:
+        elif self._visual_key() != prev_visual:
             self._redraw_sprite()
         return True
 
@@ -975,12 +982,14 @@ class Pet:
         drag.connect("drag-begin", self._on_drag_begin, overlay)
         drag.connect("drag-update", self._on_drag_update, overlay)
         drag.connect("drag-end", self._on_drag_end, overlay)
-        overlay.sprite.add_controller(drag)
+        # Attached to the container, not the sprite: gesture offsets are relative
+        # to the widget that owns the gesture, and the sprite is the thing moving.
+        overlay.canvas.add_controller(drag)
 
         click = Gtk.GestureClick()
         click.set_button(3)
         click.connect("pressed", self._on_right_click, overlay)
-        overlay.sprite.add_controller(click)
+        overlay.canvas.add_controller(click)
 
     def _on_drag_begin(self, gesture, start_x: float, start_y: float, overlay: MonitorOverlay) -> None:
         self._drag_active = True
@@ -1136,7 +1145,7 @@ class Pet:
     def _show_context_menu(self, overlay: MonitorOverlay, x: float, y: float) -> None:
         self._actions.lookup_action("auto").set_state(GLib.Variant.new_boolean(not self._manual_override))
         popover = Gtk.PopoverMenu.new_from_model(self._build_menu_model())
-        popover.set_parent(overlay.sprite)
+        popover.set_parent(overlay.canvas)
         popover.set_has_arrow(False)
         popover.set_pointing_to(Gdk.Rectangle(int(x), int(y), 1, 1))
         popover.connect("closed", lambda p: GLib.idle_add(p.unparent))
