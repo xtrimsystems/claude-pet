@@ -552,6 +552,7 @@ class SpriteArea(Gtk.DrawingArea):
     def __init__(self, size: int) -> None:
         super().__init__()
         self._draw_sprite = None
+        self.active = False   # False: stays where it is but paints fully transparent
         self.set_size(size)
         self.set_draw_func(self._on_draw)
 
@@ -567,7 +568,7 @@ class SpriteArea(Gtk.DrawingArea):
         ctx.set_source_rgba(0, 0, 0, 0)
         ctx.paint()
         ctx.set_operator(cairo.OPERATOR_OVER)
-        if self._draw_sprite is not None:
+        if self.active and self._draw_sprite is not None:
             self._draw_sprite(ctx, width, height)
 
 
@@ -604,8 +605,6 @@ class MonitorOverlay(Gtk.Window):
         self.canvas = self._fixed   # stable coordinate space for gestures and popovers
         self._fixed.put(self.sprite, 0, 0)
         self._fixed.put(self.clone, 0, 0)
-        self.sprite.set_visible(False)
-        self.clone.set_visible(False)
         self._positions: dict[SpriteArea, tuple[int, int]] = {}
         self._input_rects: list[Rect] = []
         self.connect("realize", lambda w: self._apply_input_region())
@@ -614,20 +613,29 @@ class MonitorOverlay(Gtk.Window):
         """Show `area` at a global desktop position if it touches this monitor."""
         mx, my, _, _ = self.rect
         if not _intersects((global_x, global_y, size, size), self.rect):
-            area.set_visible(False)
+            self.park(area)
             return False
         self._fixed.move(area, global_x - mx, global_y - my)
         self._positions[area] = (global_x - mx, global_y - my)
-        area.set_visible(True)
+        area.active = True
         area.queue_draw()
         return True
 
+    def park(self, area: SpriteArea) -> None:
+        """Blank `area` in place.
+
+        Hiding or moving the widget away leaves its last frame on screen: with
+        nothing left to draw, GTK skips the frame and the compositor keeps the
+        old buffer. Painting the same spot transparent forces a real repaint.
+        """
+        if area in self._positions:
+            del self._positions[area]
+            area.active = False
+            area.queue_draw()
+
     def update_input_region(self) -> None:
         rects = []
-        for area in (self.sprite, self.clone):
-            if not area.get_visible():
-                continue
-            x, y = self._positions.get(area, (0, 0))
+        for area, (x, y) in self._positions.items():
             rects.append((x, y, area.get_content_width(), area.get_content_height()))
         if rects != self._input_rects:
             self._input_rects = rects
@@ -658,9 +666,11 @@ class Pet:
         debug: bool = False,
         sprites_dir: str | None = None,
         mascot_path: str | None = None,
+        monitor: str | None = None,
         on_quit=None,
     ) -> None:
         self.character = character
+        self._preferred_monitor = monitor
         self.bridge = bridge
         self._size = size
         self._debug = debug
@@ -736,7 +746,11 @@ class Pet:
     def _monitor_rects(self) -> list[Rect]:
         return [o.rect for o in self._overlays]
 
-    def _primary_rect(self) -> Rect:
+    def _spawn_rect(self) -> Rect:
+        """The preferred monitor (by connector name, e.g. DP-6), else the first one."""
+        for overlay in self._overlays:
+            if overlay.monitor.get_connector() == self._preferred_monitor:
+                return overlay.rect
         return self._overlays[0].rect
 
     # ------------------------------------------------------------------
@@ -754,7 +768,7 @@ class Pet:
             self._wander.x = prev.x
             self._wander.set_active_monitor_at(prev.x, prev.y)
         else:
-            gx, gy, gw, gh = self._primary_rect()
+            gx, gy, gw, gh = self._spawn_rect()
             margin = 50
             self._wander.x = float(random.randint(gx + margin, gx + gw - self._size - margin))
         # Snap to ground so we don't start floating
@@ -920,13 +934,12 @@ class Pet:
                 overlay.clone.set_painter(self._draw_clone)
                 overlay.place(overlay.clone, self._clone["x"], self._clone["y"], self._size)
             else:
-                overlay.clone.set_visible(False)
+                overlay.park(overlay.clone)
             overlay.update_input_region()
 
     def _redraw_sprite(self) -> None:
         for overlay in self._overlays:
-            if overlay.sprite.get_visible():
-                overlay.sprite.queue_draw()
+            overlay.sprite.queue_draw()
 
     def _draw_clone(self, ctx: cairo.Context, width: int, height: int) -> None:
         clone = self._clone

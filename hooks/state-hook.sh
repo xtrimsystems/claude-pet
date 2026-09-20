@@ -33,8 +33,18 @@ pet_running() {
     [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null
 }
 
+focused_monitor() {
+    command -v hyprctl >/dev/null || return
+    hyprctl monitors -j 2>/dev/null | python3 -c "
+import json, sys
+print(next((m['name'] for m in json.load(sys.stdin) if m.get('focused')), ''))
+" 2>/dev/null
+}
+
 start_pet() {
-    nohup python3 "$PET_DIR/main.py" &>/dev/null &
+    local monitor
+    monitor=$(focused_monitor)
+    nohup python3 "$PET_DIR/main.py" ${monitor:+--monitor "$monitor"} &>/dev/null &
     disown
     sleep 0.5  # give main.py time to write its PID file
 }

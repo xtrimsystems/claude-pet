@@ -69,6 +69,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Path to mascot directory with shime*.png sprites (Shimeji-ee / Shijima-Qt format)",
     )
     parser.add_argument(
+        "--monitor",
+        type=str,
+        default=None,
+        help="Connector name of the monitor to appear on, e.g. DP-6 (default: config.json \"monitor\", else the first monitor)",
+    )
+    parser.add_argument(
         "--pid-file",
         type=str,
         default="/tmp/claude-pet.pid",
@@ -170,7 +176,8 @@ def main() -> None:
     logger.info("Starting Claude Pet: size=%d, state_file=%s, pid_file=%s",
                 args.size, args.state_file, args.pid_file)
 
-    mascot_path = resolve_mascot(args.mascot, load_config())
+    config = load_config()
+    mascot_path = resolve_mascot(args.mascot, config)
     if mascot_path is None or not os.path.isdir(mascot_path):
         print("Error: No mascot found. Place a mascot in sprites/ or use --mascot <path>")
         print("See sprites/README.md for details.")
@@ -192,6 +199,7 @@ def main() -> None:
         debug=args.debug,
         sprites_dir=DEFAULT_SPRITES_DIR,
         mascot_path=mascot_path,
+        monitor=args.monitor or config.get("monitor"),
         on_quit=loop.quit,
     )
 

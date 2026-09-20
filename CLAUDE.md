@@ -6,7 +6,7 @@ Shimeji-style desktop pet for Claude Code. A transparent, click-through overlay 
 
 4 Python files, no build system (runs directly with system python3):
 
-- **main.py** - Entry point. Re-execs itself with `libgtk4-layer-shell` in `LD_PRELOAD` (the library must load before libwayland-client, which a language binding can't guarantee — this is the documented approach), parses args (`--size`, `--mascot`, `--state-file`, `--pid-file`, `--debug`), loads config from `~/.config/claude-pet/config.json`, resolves the mascot, creates `SpriteCharacter` + `ClaudeBridge` + `Pet`, runs a GLib main loop. Single instance via `/tmp/claude-pet.pid` (the PID file is only removed by the process that owns it).
+- **main.py** - Entry point. Re-execs itself with `libgtk4-layer-shell` in `LD_PRELOAD` (the library must load before libwayland-client, which a language binding can't guarantee — this is the documented approach), parses args (`--size`, `--mascot`, `--monitor`, `--state-file`, `--pid-file`, `--debug`), loads config from `~/.config/claude-pet/config.json`, resolves the mascot, creates `SpriteCharacter` + `ClaudeBridge` + `Pet`, runs a GLib main loop. Single instance via `/tmp/claude-pet.pid` (the PID file is only removed by the process that owns it).
 - **pet_window.py** - The core. `MonitorOverlay` (one full-output layer-shell surface per monitor, `overlay` layer, transparent, input region limited to the sprite), `SpriteArea` (a small `Gtk.DrawingArea` moved inside a `Gtk.Fixed`), `WanderEngine` (movement AI) and `Pet` (the controller: 60fps GLib timer, drag/throw gestures, right-click `Gtk.PopoverMenu`, clone-kill animation, bridge integration). Positions are global desktop coordinates; each overlay shows the sprite only if it touches its monitor, so dragging across monitors just works.
 - **sprite_character.py** - Loads shime*.png sprites from mascot directories. Defines two animation config dicts: `_state_config` (Claude states) and `_move_config` (movement animations). Handles frame advancement, looping, and state transitions.
 - **claude_bridge.py** - Polls the state file (`/tmp/claude-pet-state`) every 300ms for state changes. Has a 60-second idle timeout that auto-transitions to idle if no state change occurs. Valid states: idle, thinking, working, attention, celebrating, doubling.
@@ -48,7 +48,7 @@ When Claude state is working, thinking, error, attention, doubling, clone_frozen
 Hooks are configured in each Claude Code config dir's `settings.json` (`hooks/install-hooks.sh ~/.claude ~/.claude-work`) and call `hooks/state-hook.sh`, which reads the hook JSON from stdin for the `session_id`, keeps `/tmp/claude-pet-sessions/<session_id>` as the set of live sessions, starts the pet if it is not running, and writes the state to `/tmp/claude-pet-state`. Bridge polls this file every 300ms. All sessions (including subagents in other folders) feed the same pet — last writer wins.
 
 Current hook mapping (installed by `hooks/install-hooks.sh`):
-- **SessionStart** -> "idle" (registers the session; auto-starts the pet if not running)
+- **SessionStart** -> "idle" (registers the session; auto-starts the pet if not running, on the monitor that is focused at that moment — `hyprctl monitors` — so it appears next to the terminal that started it; `--monitor`/config `"monitor"` override)
 - **UserPromptSubmit** -> "thinking" (user sent a message, Claude is processing the prompt)
 - **PreToolUse** -> "working" (tool is about to execute - the actual work)
 - **PermissionRequest** -> "attention" (Claude needs permission approval)
@@ -111,13 +111,14 @@ Note: PostToolUse and PostToolUseFailure are intentionally not hooked — they f
 ## Key Technical Details
 
 - **Layer-shell overlays** - one `Gtk.Window` per monitor, anchored to all four edges with exclusive zone -1 (covers the whole output, including bar areas), layer `overlay` (above fullscreen windows), keyboard mode `none`, namespace `claude-pet` (visible in `hyprctl layers`). Transparent via CSS `window.claude-pet { background-color: transparent; }`. `Gdk.Surface.set_input_region` is updated whenever a sprite moves so only the sprite rectangles take clicks.
+- **Leaving a monitor** - a sprite that leaves an overlay is not hidden but painted transparent in place (`SpriteArea.active = False`): with nothing left to draw GTK skips the frame and the compositor keeps showing the old buffer, i.e. a ghost.
 - **Drawing cost** - only the 128x128 `SpriteArea` nodes are redrawn (`queue_draw` on the sprite, not the window), and only when position, frame or state changed; the timer itself runs at 60fps. Idle CPU ~1%.
 - **Gestures** - `Gtk.GestureDrag` (button 1) for drag/throw with the implicit grab, so the drag keeps tracking when the pointer leaves the sprite or the monitor; `Gtk.GestureClick` (button 3) for the menu.
 - **Monitor hotplug** - `Gdk.Display.get_monitors()` "items-changed" rebuilds the overlays and the wander bounds.
 - **60fps frame timer** - `FRAME_INTERVAL_MS = 1000 // 60 = 16ms`. Character `_TICK_MS` matches this.
 - **Sprite fallback** - if a sprite index is missing, falls back to the lowest available sprite number (line 167-175 of sprite_character.py). This means animations work even if a mascot is missing some sprites.
 - **Multi-monitor** - WanderEngine tracks the active monitor (global coordinates), switches on drag-drop. Pet is constrained to one monitor at a time.
-- **Config persistence** - mascot selection saved to `~/.config/claude-pet/config.json`.
+- **Config persistence** - mascot selection saved to `~/.config/claude-pet/config.json`; an optional `"monitor": "DP-6"` there pins the spawn monitor.
 - **Sprites skip tiny files** - PNGs under 500 bytes are skipped (assumed blank/transparent).
 
 ## Running

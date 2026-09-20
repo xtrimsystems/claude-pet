@@ -45,6 +45,7 @@ python3 main.py --mascot /path/to/your/mascot
 --mascot PATH            Path to mascot directory with shime*.png sprites
 --state-file PATH        Path to state file (default: /tmp/claude-pet-state)
 --pid-file PATH          Path to PID file (default: /tmp/claude-pet.pid)
+--monitor NAME           Monitor to appear on, e.g. DP-6 (default: "monitor" in config.json, else the first)
 --debug                  Enable debug logging (and the more active wander mode)
 ```
 
