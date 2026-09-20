@@ -6,22 +6,26 @@
 
 set -e
 
-SETTINGS_FILE="$HOME/.claude/settings.json"
+# Usage: uninstall-hooks.sh [config-dir ...]   (default: ~/.claude)
+CONFIG_DIRS=("$@")
+[ ${#CONFIG_DIRS[@]} -eq 0 ] && CONFIG_DIRS=("$HOME/.claude")
 
-echo "  Removing Claude Code hooks..."
+for SETTINGS_DIR in "${CONFIG_DIRS[@]}"; do
+SETTINGS_FILE="$SETTINGS_DIR/settings.json"
+echo "  Removing Claude Code hooks from $SETTINGS_FILE..."
 
 if [ ! -f "$SETTINGS_FILE" ]; then
     echo "  No settings file found at $SETTINGS_FILE — nothing to do."
-    exit 0
+    continue
 fi
 
-python3 << 'PYEOF'
+python3 << PYEOF
 import json
 import os
 import shutil
 from pathlib import Path
 
-settings_file = Path(os.path.expanduser("~/.claude/settings.json"))
+settings_file = Path("$SETTINGS_FILE")
 
 if not settings_file.exists():
     print("  No settings file found — nothing to do.")
@@ -79,5 +83,6 @@ if removed_count > 0:
 else:
     print("  No claude-pet hooks found — nothing removed.")
 PYEOF
+done
 
 echo "  Done."

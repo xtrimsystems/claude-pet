@@ -10,27 +10,27 @@ Uses the [Shimeji-ee](https://kilkakon.com/shimeji/) / [Shijima-Qt](https://gets
 - Shimeji-style wandering: walks, climbs screen edges, sits, jumps, falls
 - Drag and throw with physics simulation
 - Multi-monitor support
-- **Social behaviors**: multiple pets interact — they face each other when sitting nearby, avoid sitting next to each other, and occasionally fight (attacker plays attack animation, defender gets shoved back)
 - Right-click context menu for manual state control, scaling, and special actions
-- Auto-starts when Claude Code runs (via hooks)
-- Works on X11 with a compositor (picom, compton, etc.)
+- Auto-starts with your first Claude Code session and leaves with the last one (via hooks)
+- One pet for the whole desktop — every session (and subagent) drives the same pet
+- Native Wayland: a click-through layer-shell overlay on every monitor
 
 ## Requirements
 
-- Linux with X11 and a compositor
+- A Wayland compositor with `wlr-layer-shell` (Hyprland, sway, river, …)
 - Python 3.10+
-- GTK 3 (PyGObject)
+- GTK 4 (PyGObject), pycairo and gtk4-layer-shell
 
 ```bash
-sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 xprop
+sudo pacman -S python-gobject python-cairo gtk4 gtk4-layer-shell
 ```
 
 ## Quick Start
 
 1. Clone the repo
 2. Add a mascot pack to `sprites/` (see [sprites/README.md](sprites/README.md))
-3. Install hooks: `make install`
-4. Run: `make run`
+3. Install hooks: `make install` (into `~/.claude` and `~/.claude-work`; set `CLAUDE_CONFIG_DIRS` for other config dirs)
+4. Start a Claude Code session — or run it by hand: `make run`
 
 Or with a specific mascot:
 
@@ -38,24 +38,14 @@ Or with a specific mascot:
 python3 main.py --mascot /path/to/your/mascot
 ```
 
-## i3 / Regolith Users
-
-Add to your i3 config:
-
-```
-for_window [class="Claude-pet"] floating enable, border none, sticky enable
-for_window [title="Claude Pet"] floating enable, border none, sticky enable
-```
-
 ## Options
 
 ```
---size SIZE              Window size in pixels (default: 128)
+--size SIZE              Sprite size in pixels (default: 128)
 --mascot PATH            Path to mascot directory with shime*.png sprites
 --state-file PATH        Path to state file (default: /tmp/claude-pet-state)
 --pid-file PATH          Path to PID file (default: /tmp/claude-pet.pid)
---project-name NAME      Project name to display near the sprite
---debug                  Enable debug logging
+--debug                  Enable debug logging (and the more active wander mode)
 ```
 
 ## How It Works
@@ -67,17 +57,18 @@ Claude Pet installs hooks into Claude Code that write state changes to a file. T
 | User sends prompt | Thinking |
 | Tool use starts | Working |
 | Permission needed | Attention |
-| Session stops | Celebrating (then idle) |
+| Claude finishes a turn | Celebrating (then idle) |
 | Context compaction | Doubling (clone-kill animation) |
 | Idle for 60s | Idle (wandering around) |
+| Last session ends | Pet exits |
 
-When idle, the pet wanders the screen Shimeji-style — walking along edges, climbing walls, sitting, kicking, jumping. When multiple Claude Code sessions are active, their pets interact: they face each other when sitting nearby, avoid crowding, and occasionally pick fights.
+When idle, the pet wanders the screen Shimeji-style — walking along edges, climbing walls, sitting, kicking, jumping. Drag it around, throw it, or right-click it for the menu (scale, mascot, poses, quit).
 
-You can spawn test pets to see social behaviors in action:
+The hook script registers every live session in `/tmp/claude-pet-sessions/`; the pet is started by the first one and stopped by the last one, so several sessions, terminals and subagents share a single pet.
 
 ```bash
-make test-pet   # run multiple times to spawn several pets
-make stop       # kill them all
+make test-states   # cycle the pet through all states
+make stop          # kill it
 ```
 
 ## Acknowledgments

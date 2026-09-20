@@ -1,25 +1,28 @@
-"""GTK3 transparent floating window for the Claude Pet desktop companion.
+"""Wayland layer-shell overlay for the Claude Pet desktop companion.
 
-Creates a borderless, always-on-top, RGBA-transparent window suitable
-for X11 with a picom compositor. Wanders across the screen like a
-Shimeji desktop pet with climbing, falling, and edge awareness.
-Supports multi-monitor setups.
+One transparent, click-through surface per monitor on the `overlay` layer
+(wlr-layer-shell via gtk4-layer-shell). The sprite is a small widget moved
+inside a Gtk.Fixed, so the compositor only re-renders the sprite, and the
+surface's input region is limited to the sprite so everything else clicks
+through. Wanders across the screen like a Shimeji desktop pet with climbing,
+falling, and edge awareness. Supports multi-monitor.
 """
 
 from __future__ import annotations
 
 import enum
 import logging
+import os
 import random
-import subprocess
 from typing import Protocol
 
 import cairo
 import gi
 
-gi.require_version("Gtk", "3.0")
-gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+gi.require_version("Gtk4LayerShell", "1.0")
+from gi.repository import Gdk, Gio, GLib, Gtk, Gtk4LayerShell as LayerShell  # noqa: E402
 
 # Raw xlib for z-order control. GTK3's Gdk.Window.raise_() is unreliable on
 # POPUP/override-redirect windows under i3 — it demotes the window in some
@@ -40,6 +43,8 @@ class CharacterProto(Protocol):
     state: str
     frame: int
     is_busy: bool
+    _sprites: dict
+    _state_config: dict
     def draw(self, ctx: cairo.Context, width: int, height: int) -> None: ...
     def tick(self) -> None: ...
     def set_state(self, state: str) -> None: ...
@@ -56,7 +61,8 @@ FRAME_INTERVAL_MS = 1000 // 60
 TEST_STATES = ("idle", "thinking", "working", "attention", "celebrating")
 SPRITE_BASE = 128  # Shimeji sprites are 128x128
 SCALE_OPTIONS = (0.5, 1.0, 1.5, 2.0)
-LABEL_HEIGHT = 20  # Extra height below sprite for project name label
+
+TRANSPARENT_CSS = b"window.claude-pet { background-color: transparent; }"
 
 
 # ======================================================================
@@ -110,7 +116,6 @@ class WanderEngine:
     CALM_WEIGHTS   = {"sit": 200, "walk": 50, "climb": 10, "kick": 6, "jump": 2, "clone_kill": 2, "error": 2}
     ACTIVE_WEIGHTS = {"sit":  50, "walk": 150, "climb": 40, "kick": 18, "jump": 7, "clone_kill": 5, "error": 5}
     STUMBLE_CHANCE = 0.0003      # per frame while walking (~2% per second)
-    STUMBLE_CHANCE_CLOSE = 0.003  # per frame when another pet is very close (~16% per second)
 
     # Sit durations (frames at 60 fps)
     CALM_SIT   = (600, 2400)   # 10–40 s
@@ -123,16 +128,13 @@ class WanderEngine:
     FALL_CHANCE_TOP = 0.0008   # per-frame chance to fall while on ceiling
 
     def __init__(self, monitors: list[tuple[int, int, int, int]],
-                 pet_size: int, pet_height: int | None = None,
-                 margin: int = 2,
+                 pet_size: int, margin: int = 2,
                  active: bool = False) -> None:
         self._monitors = monitors
         self._pet_size = pet_size
-        self._pet_height = pet_height or pet_size
+        self._pet_height = pet_size
         self._margin = margin
         self.active_mode = active
-        self._social_block_sit = False  # set by PetWindow from social directive
-        self._social_peer_nearby = False  # True when another pet is very close
 
         # Start on primary monitor (index 0)
         self._active_idx = 0
@@ -181,10 +183,8 @@ class WanderEngine:
 
     # --- behavior selection (Shimeji-style weighted random) ---
 
-    def _pick_behavior(self, block_sit: bool = False) -> Move:
+    def _pick_behavior(self) -> Move:
         weights = dict(self.ACTIVE_WEIGHTS if self.active_mode else self.CALM_WEIGHTS)
-        if block_sit:
-            weights.pop("sit", None)
         total = sum(weights.values())
         roll = random.random() * total
         cumulative = 0.0
@@ -259,9 +259,7 @@ class WanderEngine:
         self.y = self.y_max
         self.x += self._walk_speed * self.direction
 
-        # Random stumble while walking (more likely when another pet is very close)
-        chance = self.STUMBLE_CHANCE_CLOSE if self._social_peer_nearby else self.STUMBLE_CHANCE
-        if random.random() < chance:
+        if random.random() < self.STUMBLE_CHANCE:
             self.pending_anim = "stumble"
             self._start_sit()
             return
@@ -363,7 +361,7 @@ class WanderEngine:
 
     def _transition(self) -> None:
         """Pick the next behavior using weighted random selection."""
-        nxt = self._pick_behavior(block_sit=self._social_block_sit)
+        nxt = self._pick_behavior()
         if nxt in ("clone_kill", "error"):
             self.pending_anim = nxt
             self._start_sit()
@@ -527,139 +525,149 @@ class WanderEngine:
             self.move_state = Move.FALL
 
 
+
 # ======================================================================
-# Clone window (temporary sprite overlay for clone-kill animation)
+# Monitors
 # ======================================================================
 
-class CloneWindow(Gtk.Window):
-    """Lightweight temporary window that plays a sprite animation and calls back."""
+Rect = tuple[int, int, int, int]
 
-    def __init__(self, sprites: dict, indices: list[int], delay: int,
-                 size: int, x: int, y: int, facing: int,
-                 on_done: callable) -> None:
-        super().__init__(type=Gtk.WindowType.POPUP)
-        self._sprites = sprites
-        self._indices = indices
-        self._delay = delay
-        self._size = size
-        self._facing = facing
-        self._frame = 0
-        self._on_done = on_done
 
-        self.set_default_size(size, size)
-        self.set_resizable(False)
-        self.set_decorated(False)
-        self.set_keep_above(True)
-        self.stick()
-        self.set_skip_taskbar_hint(True)
-        self.set_skip_pager_hint(True)
+def _monitor_rect(monitor: Gdk.Monitor) -> Rect:
+    g = monitor.get_geometry()
+    return (g.x, g.y, g.width, g.height)
 
-        screen = self.get_screen()
-        visual = screen.get_rgba_visual()
-        if visual:
-            self.set_visual(visual)
-        self.set_app_paintable(True)
 
-        self._da = Gtk.DrawingArea()
-        self._da.set_size_request(size, size)
-        self._da.connect("draw", self._on_draw)
-        self.add(self._da)
+def _intersects(a: Rect, b: Rect) -> bool:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    return ax < bx + bw and ax + aw > bx and ay < by + bh and ay + ah > by
 
-        self.set_type_hint(Gdk.WindowTypeHint.DOCK)
-        self.set_wmclass("claude-pet", "claude-pet")
-        self.connect("realize", self._on_realize)
-        self.move(x, y)
-        self.show_all()
-        self._timer = GLib.timeout_add(delay, self._tick)
 
-    def _on_realize(self, widget: Gtk.Window) -> None:
-        try:
-            xid = self.get_window().get_xid()
-            subprocess.Popen(
-                ["xprop", "-id", str(xid),
-                 "-f", "_COMPTON_SHADOW", "32c",
-                 "-set", "_COMPTON_SHADOW", "0"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
+class SpriteArea(Gtk.DrawingArea):
+    """A fixed-size drawing area that renders one sprite frame."""
 
-    def _on_draw(self, widget: Gtk.DrawingArea, ctx: cairo.Context) -> bool:
+    def __init__(self, size: int) -> None:
+        super().__init__()
+        self._draw_sprite = None
+        self.set_size(size)
+        self.set_draw_func(self._on_draw)
+
+    def set_size(self, size: int) -> None:
+        self.set_content_width(size)
+        self.set_content_height(size)
+
+    def set_painter(self, painter) -> None:
+        self._draw_sprite = painter
+
+    def _on_draw(self, area: Gtk.DrawingArea, ctx: cairo.Context, width: int, height: int) -> None:
         ctx.set_operator(cairo.OPERATOR_SOURCE)
         ctx.set_source_rgba(0, 0, 0, 0)
         ctx.paint()
         ctx.set_operator(cairo.OPERATOR_OVER)
-
-        idx = self._indices[self._frame % len(self._indices)]
-        surface = self._sprites.get(idx)
-        if surface is None:
-            return True
-
-        w = widget.get_allocated_width()
-        h = widget.get_allocated_height()
-        sw = surface.get_width()
-        sh = surface.get_height()
-
-        ctx.save()
-        sx = w / sw
-        sy = h / sh
-        if self._facing > 0:
-            ctx.translate(w, 0)
-            ctx.scale(-sx, sy)
-        else:
-            ctx.scale(sx, sy)
-        ctx.set_source_surface(surface, 0, 0)
-        ctx.get_source().set_filter(cairo.FILTER_NEAREST)
-        ctx.paint()
-        ctx.restore()
-        return True
-
-    def _tick(self) -> bool:
-        self._frame += 1
-        if self._frame >= len(self._indices):
-            self._on_done(self)
-            return False
-        self._da.queue_draw()
-        return True
+        if self._draw_sprite is not None:
+            self._draw_sprite(ctx, width, height)
 
 
-# ======================================================================
-# Main window
-# ======================================================================
+class MonitorOverlay(Gtk.Window):
+    """Full-output transparent layer surface for one monitor.
 
-class PetWindow(Gtk.Window):
-    """Transparent floating pet window for X11/i3.
-
-    Uses POPUP type to bypass the window manager — no struts, no tiling,
-    always rendered on top. Supports multi-monitor.
+    Hosts the pet sprite (and the temporary clone) as children of a Gtk.Fixed,
+    positioned in monitor-local coordinates. Only the sprite rectangles are
+    part of the input region, so the rest of the screen stays interactive.
     """
+
+    def __init__(self, monitor: Gdk.Monitor, size: int) -> None:
+        super().__init__()
+        self.monitor = monitor
+        self.rect = _monitor_rect(monitor)
+        self.add_css_class("claude-pet")
+        self.set_decorated(False)
+
+        LayerShell.init_for_window(self)
+        LayerShell.set_namespace(self, "claude-pet")
+        LayerShell.set_layer(self, LayerShell.Layer.OVERLAY)
+        LayerShell.set_monitor(self, monitor)
+        LayerShell.set_keyboard_mode(self, LayerShell.KeyboardMode.NONE)
+        LayerShell.set_exclusive_zone(self, -1)
+        for edge in (LayerShell.Edge.LEFT, LayerShell.Edge.RIGHT,
+                     LayerShell.Edge.TOP, LayerShell.Edge.BOTTOM):
+            LayerShell.set_anchor(self, edge, True)
+
+        self._fixed = Gtk.Fixed()
+        self.set_child(self._fixed)
+
+        self.sprite = SpriteArea(size)
+        self.clone = SpriteArea(size)
+        self._fixed.put(self.sprite, 0, 0)
+        self._fixed.put(self.clone, 0, 0)
+        self.sprite.set_visible(False)
+        self.clone.set_visible(False)
+        self._positions: dict[SpriteArea, tuple[int, int]] = {}
+        self._input_rects: list[Rect] = []
+        self.connect("realize", lambda w: self._apply_input_region())
+
+    def place(self, area: SpriteArea, global_x: int, global_y: int, size: int) -> bool:
+        """Show `area` at a global desktop position if it touches this monitor."""
+        mx, my, _, _ = self.rect
+        if not _intersects((global_x, global_y, size, size), self.rect):
+            area.set_visible(False)
+            return False
+        self._fixed.move(area, global_x - mx, global_y - my)
+        self._positions[area] = (global_x - mx, global_y - my)
+        area.set_visible(True)
+        area.queue_draw()
+        return True
+
+    def update_input_region(self) -> None:
+        rects = []
+        for area in (self.sprite, self.clone):
+            if not area.get_visible():
+                continue
+            x, y = self._positions.get(area, (0, 0))
+            rects.append((x, y, area.get_content_width(), area.get_content_height()))
+        if rects != self._input_rects:
+            self._input_rects = rects
+            self._apply_input_region()
+
+    def _apply_input_region(self) -> None:
+        surface = self.get_surface()
+        if surface is None:
+            return
+        region = cairo.Region()
+        for x, y, w, h in self._input_rects:
+            region.union(cairo.RectangleInt(x, y, w, h))
+        surface.set_input_region(region)
+
+
+# ======================================================================
+# Pet controller
+# ======================================================================
+
+class Pet:
+    """Drives the sprite across all monitors and reacts to Claude Code state."""
 
     def __init__(
         self,
         character: CharacterProto,
         bridge: ClaudeBridgeProto,
-        size: int = 192,
+        size: int = 128,
         debug: bool = False,
         sprites_dir: str | None = None,
         mascot_path: str | None = None,
-        project_name: str | None = None,
-        social_engine: object | None = None,
+        on_quit=None,
     ) -> None:
-        super().__init__(type=Gtk.WindowType.POPUP)
-
         self.character = character
         self.bridge = bridge
         self._size = size
         self._debug = debug
         self._sprites_dir = sprites_dir
         self._mascot_path = mascot_path
-        self._project_name = project_name
-        self._social = social_engine
-        self._label_height = LABEL_HEIGHT if project_name else 0
+        self._on_quit = on_quit
 
         self._drag_active = False
-        self._drag_offset_x = 0.0
-        self._drag_offset_y = 0.0
+        self._drag_start_x = 0.0
+        self._drag_start_y = 0.0
         self._drag_prev_x = 0.0
         self._drag_prev_y = 0.0
         self._drag_vel_x = 0.0       # actual mouse velocity for throw
@@ -673,119 +681,86 @@ class PetWindow(Gtk.Window):
         # animation finishes (non-looping) or user picks "Auto".
         self._manual_override = False
         self._menu_timeout_id: int | None = None
-        self._wander_anim_timer_id: int | None = None
-
         self._frame_timer_id: int | None = None
         self._raise_timer_id: int | None = None
         self._wander: WanderEngine | None = None
         self._draw_offset_x: int = 0
         self._draw_offset_y: int = 0
-        self._label_on_top: bool = True
-        self._clone_window: CloneWindow | None = None
-        self._clone_falling: bool = False
-        self._last_social_directive = None
-        self._pending_throw: tuple[float, float] | None = None
 
-        self._setup_window()
-        self._setup_drawing()
-        self._setup_input()
-        self._place_on_screen()
+        # Clone-kill animation: a second sprite drawn next to the pet
+        self._clone: dict | None = None
+        self._clone_timer_id: int | None = None
+
+        self._overlays: list[MonitorOverlay] = []
+        self._display = Gdk.Display.get_default()
+        self._install_css()
+        self._actions = self._build_actions()
+        self._build_overlays()
+        self._monitors_model = self._display.get_monitors()
+        self._monitors_model.connect("items-changed", self._on_monitors_changed)
         self._init_wander()
         self._start_timers()
         self._start_bridge()
 
     # ------------------------------------------------------------------
-    # Window configuration
+    # Overlays (one per monitor)
     # ------------------------------------------------------------------
 
-    def _setup_window(self) -> None:
-        self.set_default_size(self._size, self._size + self._label_height)
-        self.set_resizable(False)
-        self.set_decorated(False)
-        self.set_keep_above(True)
-        self.stick()
-        self.set_skip_taskbar_hint(True)
-        self.set_skip_pager_hint(True)
+    def _install_css(self) -> None:
+        provider = Gtk.CssProvider()
+        provider.load_from_data(TRANSPARENT_CSS)
+        Gtk.StyleContext.add_provider_for_display(
+            self._display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
-        screen = self.get_screen()
-        visual = screen.get_rgba_visual()
-        if visual is not None:
-            self.set_visual(visual)
-            logger.debug("RGBA visual enabled")
-        else:
-            logger.warning("RGBA visual not available")
+    def _build_overlays(self) -> None:
+        for overlay in self._overlays:
+            overlay.destroy()
+        self._overlays = []
+        monitors = self._display.get_monitors()
+        for i in range(monitors.get_n_items()):
+            overlay = MonitorOverlay(monitors.get_item(i), self._size)
+            overlay.insert_action_group("pet", self._actions)
+            self._attach_input(overlay)
+            overlay.present()
+            self._overlays.append(overlay)
+        logger.debug("Monitors: %s", [o.rect for o in self._overlays])
 
-        self.set_app_paintable(True)
-        self.set_type_hint(Gdk.WindowTypeHint.DOCK)
-        # Distinctive WM_CLASS so external tools (e.g. xborders-rainbow) can
-        # skip drawing overlays on top of the pet.
-        self.set_wmclass("claude-pet", "claude-pet")
-        self.connect("realize", self._on_realize)
-        self.connect("destroy", self._on_destroy)
+    def _on_monitors_changed(self, model, position, removed, added) -> None:
+        logger.debug("Monitor layout changed, rebuilding overlays")
+        self._build_overlays()
+        self._init_wander()
 
-    def _setup_drawing(self) -> None:
-        self._drawing_area = Gtk.DrawingArea()
-        self._drawing_area.set_size_request(self._size, self._size + self._label_height)
-        self._drawing_area.connect("draw", self._on_draw)
-        self.add(self._drawing_area)
+    def _monitor_rects(self) -> list[Rect]:
+        return [o.rect for o in self._overlays]
 
-    def _setup_input(self) -> None:
-        self.add_events(
-            Gdk.EventMask.BUTTON_PRESS_MASK
-            | Gdk.EventMask.BUTTON_RELEASE_MASK
-            | Gdk.EventMask.POINTER_MOTION_MASK
-        )
-        self.connect("button-press-event", self._on_button_press)
-        self.connect("button-release-event", self._on_button_release)
-        self.connect("motion-notify-event", self._on_motion)
-
-    def _get_monitor_geometries(self) -> list[tuple[int, int, int, int]]:
-        """Get (x, y, width, height) for every connected monitor."""
-        screen = self.get_screen()
-        monitors = []
-        for i in range(screen.get_n_monitors()):
-            g = screen.get_monitor_geometry(i)
-            monitors.append((g.x, g.y, g.width, g.height))
-        return monitors
-
-    def _get_primary_monitor_geometry(self) -> Gdk.Rectangle:
-        screen = self.get_screen()
-        monitor = screen.get_primary_monitor()
-        return screen.get_monitor_geometry(monitor)
-
-    def _place_on_screen(self) -> None:
-        geom = self._get_primary_monitor_geometry()
-        margin = 50
-        x = random.randint(geom.x + margin, geom.x + geom.width - self._size - margin)
-        y = geom.y + geom.height - self._size - self._label_height - margin
-        self.move(x, y)
-        logger.debug("Window placed at (%d, %d)", x, y)
+    def _primary_rect(self) -> Rect:
+        return self._overlays[0].rect
 
     # ------------------------------------------------------------------
     # Wandering
     # ------------------------------------------------------------------
 
     def _init_wander(self) -> None:
-        monitors = self._get_monitor_geometries()
+        prev = self._wander
         self._wander = WanderEngine(
-            monitors=monitors,
+            monitors=self._monitor_rects(),
             pet_size=self._size,
-            pet_height=self._size + self._label_height,
             active=self._debug,
         )
-        logger.debug("Monitors: %s", monitors)
-        logger.debug("Active monitor: %d, mode: %s",
-                      self._wander._active_idx,
-                      "active" if self._debug else "calm")
-        logger.debug("Bounds: x=[%.0f, %.0f] y=[%.0f, %.0f]",
-                      self._wander.x_min, self._wander.y_min,
-                      self._wander.x_max, self._wander.y_max)
-        win_x, win_y = self.get_position()
-        self._wander.x = float(win_x)
-        self._wander.y = float(win_y)
+        if prev is not None:
+            self._wander.x = prev.x
+            self._wander.set_active_monitor_at(prev.x, prev.y)
+        else:
+            gx, gy, gw, gh = self._primary_rect()
+            margin = 50
+            self._wander.x = float(random.randint(gx + margin, gx + gw - self._size - margin))
         # Snap to ground so we don't start floating
         self._wander.y = self._wander.y_max
-        self.move(int(self._wander.x), int(self._wander.y))
+        logger.debug("Bounds: x=[%.0f, %.0f] y=[%.0f, %.0f], mode: %s",
+                     self._wander.x_min, self._wander.x_max,
+                     self._wander.y_min, self._wander.y_max,
+                     "active" if self._debug else "calm")
+        self._render()
 
     # ------------------------------------------------------------------
     # Timers
@@ -826,6 +801,7 @@ class PetWindow(Gtk.Window):
 
     def _on_frame_tick(self) -> bool:
         prev_state = self.character.state
+        prev_frame = self.character.frame
         self.character.tick()
 
         # If a non-looping animation just finished (state changed),
@@ -835,15 +811,10 @@ class PetWindow(Gtk.Window):
                 self._manual_override = False
                 logger.debug("Manual override cleared (animation finished)")
 
-        # Clear social fight when attack -> celebrating transition happens
-        if prev_state == "attack" and self.character.state == "celebrating":
-            if self._social:
-                self._social.clear_fight()
-
         # Detect doubling finished → spawn clone
         if (prev_state == "doubling"
                 and self.character.state == "clone_frozen"
-                and self._clone_window is None):
+                and self._clone is None):
             self._spawn_clone()
 
         # Update pendulum swing during drag (keeps swinging when mouse stops)
@@ -852,85 +823,18 @@ class PetWindow(Gtk.Window):
             damping = -self._drag_swing_vel * 0.25
             self._drag_swing_vel += spring + damping
             self._drag_swing += self._drag_swing_vel
-            swing = self._drag_swing
-            speed = abs(swing)
-            if speed < 0.2:
-                move = "drag"
-            elif swing < 0:
-                if speed < 0.6:
-                    move = "drag_left_slow"
-                elif speed < 1.5:
-                    move = "drag_left_fast"
-                else:
-                    move = "drag_left_vfast"
-            else:
-                if speed < 0.6:
-                    move = "drag_right_slow"
-                else:
-                    move = "drag_right_fast"
-            self.character.set_movement(move, -1)
+            self.character.set_movement(self._swing_sprite(), -1)
 
-        # Social engine: write position every N frames
-        if self._social and self._wander is not None:
-            move_name = {
-                Move.SIT: "sit", Move.WALK_GROUND: "walk",
-                Move.WALK_TOP: "walk", Move.CLIMB_LEFT: "climb",
-                Move.CLIMB_RIGHT: "climb", Move.FALL: "fall",
-                Move.THROW: "fall",
-            }.get(self._wander.move_state, "")
-            self._social.write_position(
-                self._wander.x, self._wander.y,
-                self._wander.direction, self.character.state,
-                move_name, self._wander._active_idx,
-            )
-
+        moved = False
         # Move unless dragging, wander disabled, or character is busy
         if (self._wander_enabled
                 and not self._drag_active
-                and not self._clone_falling
+                and self._clone is None
                 and not self.character.is_busy
                 and self._wander is not None):
-            new_x, new_y = self._wander.tick(self.character.state)
-
-            # Social engine: get directive for social behaviors
-            social_directive = None
-            self._last_social_directive = None
-            if self._social and self.character.state == "idle":
-                move_name = {
-                    Move.SIT: "sit", Move.WALK_GROUND: "walk",
-                    Move.WALK_TOP: "walk",
-                }.get(self._wander.move_state, "")
-                social_directive = self._social.tick(
-                    self._wander.x, self._wander.y,
-                    self._wander.direction, self.character.state,
-                    self._wander._active_idx, move_name,
-                )
-                # Handle fight directives
-                if social_directive.fight_role == "attacker":
-                    self._manual_override = True
-                    # Face toward the defender
-                    if social_directive.fight_peer_x > self._wander.x:
-                        self._wander.direction = 1
-                    else:
-                        self._wander.direction = -1
-                    self.character.set_state("attack")
-                elif social_directive.fight_role == "defender":
-                    # Face toward the attacker first (see the hit coming)
-                    if social_directive.fight_peer_x > self._wander.x:
-                        self._wander.direction = 1
-                        throw_dir = -1
-                    else:
-                        self._wander.direction = -1
-                        throw_dir = 1
-                    # Compute throw to clear proximity zone
-                    from social_engine import SocialEngine
-                    clear_dist = SocialEngine.PROXIMITY_FIGHT * self._size * 1.3
-                    throw_vy = -2.5
-                    air_frames = 2 * abs(throw_vy) / WanderEngine.THROW_GRAVITY
-                    throw_vx = clear_dist / max(air_frames, 1) * throw_dir
-                    # Delayed throw — face attacker briefly, then get shoved
-                    self._pending_throw = (throw_vx, throw_vy)
-                    GLib.timeout_add(250, self._on_fight_throw_start)
+            old = (int(self._wander.x), int(self._wander.y))
+            new = self._wander.tick(self.character.state)
+            moved = new != old
 
             # Check if wander wants to trigger a character animation
             # Only apply during idle — don't override bridge states like attention
@@ -939,50 +843,28 @@ class PetWindow(Gtk.Window):
                 self._wander.pending_anim = None
                 if self.character.state == "idle":
                     if anim == "clone_kill":
-                        if self._clone_window is None:
-                            self._manual_override = True
-                            self.character.set_state("doubling")
+                        self._manual_override = True
+                        self.character.set_state("doubling")
                     else:
                         self.character.set_state(anim)
 
-            # Store directive for facing override in movement sync
-            self._last_social_directive = social_directive
-
-            # Social: pass flags to wander engine
-            if social_directive and social_directive.block_sit:
-                self._wander._social_block_sit = True
-            else:
-                self._wander._social_block_sit = False
-            # Peer very close = almost overlapping (half a sprite width)
-            if social_directive:
-                self._wander._social_peer_nearby = social_directive.nearest_peer_dist < self._size * 0.5
-            else:
-                self._wander._social_peer_nearby = False
-
-            # Shift sprite inside the window to hug screen edges
-            # Window stays put, character moves within it
+            # Shift the sprite to hug screen edges while climbing / on the ceiling
             ms = self._wander.move_state
             if ms == Move.CLIMB_LEFT:
-                self._draw_offset_x = -int(self._size * 0.50)
-                self._draw_offset_y = 0
-                self._label_on_top = True
+                offsets = (-int(self._size * 0.50), 0)
             elif ms == Move.CLIMB_RIGHT:
-                self._draw_offset_x = int(self._size * 0.50)
-                self._draw_offset_y = 0
-                self._label_on_top = True
+                offsets = (int(self._size * 0.50), 0)
             elif ms == Move.WALK_TOP:
-                self._draw_offset_x = 0
-                self._draw_offset_y = -int(self._size * 0.40)
-                self._label_on_top = False
+                offsets = (0, -int(self._size * 0.40))
             else:
-                self._draw_offset_x = 0
-                self._draw_offset_y = 0
-                self._label_on_top = True
-            self.move(new_x, new_y)
+                offsets = (0, 0)
+            if offsets != (self._draw_offset_x, self._draw_offset_y):
+                self._draw_offset_x, self._draw_offset_y = offsets
+                moved = True
 
         # Sync movement state to character (for sprite selection)
-        # Skip during drag — drag sprites are set by _on_motion
-        if self._wander is not None and not self._drag_active and not self._clone_falling:
+        # Skip during drag — drag sprites are set by the drag gesture
+        if self._wander is not None and not self._drag_active and self._clone is None:
             move_map = {
                 Move.WALK_GROUND: "walk",
                 Move.WALK_TOP: "ceiling",
@@ -1005,17 +887,60 @@ class PetWindow(Gtk.Window):
                 facing = 1
             else:
                 facing = self._wander.direction
-
-            # Social: override facing toward peer when sitting
-            if (self._social and move_name == "sit"
-                    and self._last_social_directive
-                    and self._last_social_directive.face_toward is not None):
-                facing = self._last_social_directive.face_toward
-
             self.character.set_movement(move_name, facing)
 
-        self._drawing_area.queue_draw()
+        if moved or self._drag_active:
+            self._render()
+        elif prev_state != self.character.state or prev_frame != self.character.frame:
+            self._redraw_sprite()
         return True
+
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
+
+    def _sprite_pos(self) -> tuple[int, int]:
+        return (int(self._wander.x) + self._draw_offset_x,
+                int(self._wander.y) + self._draw_offset_y)
+
+    def _render(self) -> None:
+        """Position the sprite (and clone) on whichever monitors they touch."""
+        x, y = self._sprite_pos()
+        for overlay in self._overlays:
+            overlay.sprite.set_painter(self.character.draw)
+            overlay.place(overlay.sprite, x, y, self._size)
+            if self._clone is not None:
+                overlay.clone.set_painter(self._draw_clone)
+                overlay.place(overlay.clone, self._clone["x"], self._clone["y"], self._size)
+            else:
+                overlay.clone.set_visible(False)
+            overlay.update_input_region()
+
+    def _redraw_sprite(self) -> None:
+        for overlay in self._overlays:
+            if overlay.sprite.get_visible():
+                overlay.sprite.queue_draw()
+
+    def _draw_clone(self, ctx: cairo.Context, width: int, height: int) -> None:
+        clone = self._clone
+        if clone is None:
+            return
+        idx = clone["indices"][clone["frame"] % len(clone["indices"])]
+        surface = self.character._sprites.get(idx)
+        if surface is None:
+            return
+        sx = width / surface.get_width()
+        sy = height / surface.get_height()
+        ctx.save()
+        if clone["facing"] > 0:
+            ctx.translate(width, 0)
+            ctx.scale(-sx, sy)
+        else:
+            ctx.scale(sx, sy)
+        ctx.set_source_surface(surface, 0, 0)
+        ctx.get_source().set_filter(cairo.FILTER_NEAREST)
+        ctx.paint()
+        ctx.restore()
 
     # ------------------------------------------------------------------
     # Bridge
@@ -1035,372 +960,282 @@ class PetWindow(Gtk.Window):
         if new_state and new_state != self.character.state:
             logger.debug("Bridge callback: %s -> %s", self.character.state, new_state)
             # "doubling" triggers clone-kill — lock out bridge until animation finishes
-            if new_state == "doubling" and self._clone_window is None:
+            if new_state == "doubling" and self._clone is None:
                 self._manual_override = True
             self.character.set_state(new_state)
         return False
 
     # ------------------------------------------------------------------
-    # Drawing
-    # ------------------------------------------------------------------
-
-    def _on_draw(self, widget: Gtk.DrawingArea, ctx: cairo.Context) -> bool:
-        ctx.set_operator(cairo.OPERATOR_SOURCE)
-        ctx.set_source_rgba(0, 0, 0, 0)
-        ctx.paint()
-        ctx.set_operator(cairo.OPERATOR_OVER)
-
-        width = widget.get_allocated_width()
-
-        # Label on top: sprite shifts down; label on bottom: sprite stays at 0
-        sprite_y = self._label_height if self._label_on_top else 0
-
-        # Draw sprite (shifted to hug screen edges + label offset)
-        ctx.save()
-        ctx.translate(self._draw_offset_x, self._draw_offset_y + sprite_y)
-        self.character.draw(ctx, width, self._size)
-        ctx.restore()
-
-        # Draw project name label — positioned relative to sprite's draw offsets
-        if self._project_name and self._label_height > 0:
-            ctx.save()
-            ctx.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
-            ctx.set_font_size(11)
-            extents = ctx.text_extents(self._project_name)
-
-            # Follow sprite x-offset partially (stay near sprite, slightly toward center)
-            label_x_shift = self._draw_offset_x * 0.3
-            text_x = (width - extents.width) / 2 - extents.x_bearing + label_x_shift
-
-            if self._label_on_top:
-                text_y = sprite_y - 5
-            else:
-                # Just below the sprite's visual bottom
-                text_y = self._draw_offset_y + self._size + 6
-
-            # Dark outline for readability on any background
-            ctx.set_source_rgba(0, 0, 0, 0.8)
-            for dx, dy in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
-                ctx.move_to(text_x + dx, text_y + dy)
-                ctx.show_text(self._project_name)
-
-            # White text
-            ctx.set_source_rgba(1, 1, 1, 0.95)
-            ctx.move_to(text_x, text_y)
-            ctx.show_text(self._project_name)
-            ctx.restore()
-
-        return True
-
-    # ------------------------------------------------------------------
     # Input
     # ------------------------------------------------------------------
 
-    def _on_button_press(self, widget: Gtk.Window, event: Gdk.EventButton) -> bool:
-        if event.button == 1:
-            self._drag_active = True
-            self._drag_offset_x = event.x_root
-            self._drag_offset_y = event.y_root
-            win_x, win_y = self.get_position()
-            self._drag_offset_x -= win_x
-            self._drag_offset_y -= win_y
-            self._drag_prev_x = event.x_root
-            self._drag_prev_y = event.y_root
-            self._drag_vel_x = 0.0
-            self._drag_vel_y = 0.0
-            self._drag_swing = 0.0
-            self._drag_swing_vel = 0.0
-            self._draw_offset_x = 0
-            self._draw_offset_y = 0
-            self.character.set_movement("drag", -1)
-            return True
-        elif event.button == 3:
-            self._show_context_menu(event)
-            return True
-        return False
+    def _attach_input(self, overlay: MonitorOverlay) -> None:
+        drag = Gtk.GestureDrag()
+        drag.set_button(1)
+        drag.connect("drag-begin", self._on_drag_begin, overlay)
+        drag.connect("drag-update", self._on_drag_update, overlay)
+        drag.connect("drag-end", self._on_drag_end, overlay)
+        overlay.sprite.add_controller(drag)
 
-    def _on_button_release(self, widget: Gtk.Window, event: Gdk.EventButton) -> bool:
-        if event.button == 1:
-            self._drag_active = False
-            if self._wander is not None:
-                win_x, win_y = self.get_position()
-                self._wander.x = float(win_x)
-                self._wander.y = float(win_y)
-                # Detect monitor switch on drop
-                self._wander.set_active_monitor_at(win_x, win_y)
+        click = Gtk.GestureClick()
+        click.set_button(3)
+        click.connect("pressed", self._on_right_click, overlay)
+        overlay.sprite.add_controller(click)
 
-                # On the ground already?
-                if self._wander.y >= self._wander.y_max - 5:
-                    self._wander.y = self._wander.y_max
-                    self._wander._start_sit()
-                else:
-                    # Throw or drop based on release velocity
-                    speed = (self._drag_vel_x ** 2 + self._drag_vel_y ** 2) ** 0.5
-                    if speed > 0.3:
-                        # Scale up velocity for satisfying throw feel
-                        self._wander._start_throw(
-                            self._drag_vel_x * 1.0,
-                            self._drag_vel_y * 1.0,
-                        )
-                    else:
-                        self._wander._start_fall()
-            return True
-        return False
+    def _on_drag_begin(self, gesture, start_x: float, start_y: float, overlay: MonitorOverlay) -> None:
+        self._drag_active = True
+        self._drag_start_x = self._wander.x
+        self._drag_start_y = self._wander.y
+        self._drag_prev_x = 0.0
+        self._drag_prev_y = 0.0
+        self._drag_vel_x = 0.0
+        self._drag_vel_y = 0.0
+        self._drag_swing = 0.0
+        self._drag_swing_vel = 0.0
+        self._draw_offset_x = 0
+        self._draw_offset_y = 0
+        self.character.set_movement("drag", -1)
 
-    def _on_motion(self, widget: Gtk.Window, event: Gdk.EventMotion) -> bool:
-        if self._drag_active:
-            new_x = int(event.x_root - self._drag_offset_x)
-            new_y = int(event.y_root - self._drag_offset_y)
-            self.move(new_x, new_y)
+    def _on_drag_update(self, gesture, offset_x: float, offset_y: float, overlay: MonitorOverlay) -> None:
+        if not self._drag_active:
+            return
+        self._wander.x = self._drag_start_x + offset_x
+        self._wander.y = self._drag_start_y + offset_y
 
-            # Track real velocity for throw detection
-            dx = event.x_root - self._drag_prev_x
-            dy = event.y_root - self._drag_prev_y
-            self._drag_prev_x = event.x_root
-            self._drag_prev_y = event.y_root
-            self._drag_vel_x = self._drag_vel_x * 0.3 + dx * 0.7
-            self._drag_vel_y = self._drag_vel_y * 0.3 + dy * 0.7
-            push = dx * 0.01                         # mouse drags the swing
-            spring = -self._drag_swing * 0.025       # spring pulls back to center @60fps
-            damping = -self._drag_swing_vel * 0.06   # friction @60fps
-            self._drag_swing_vel += push + spring + damping
-            self._drag_swing += self._drag_swing_vel
+        # Track real velocity for throw detection
+        dx = offset_x - self._drag_prev_x
+        dy = offset_y - self._drag_prev_y
+        self._drag_prev_x = offset_x
+        self._drag_prev_y = offset_y
+        self._drag_vel_x = self._drag_vel_x * 0.3 + dx * 0.7
+        self._drag_vel_y = self._drag_vel_y * 0.3 + dy * 0.7
+        push = dx * 0.01                         # mouse drags the swing
+        spring = -self._drag_swing * 0.025       # spring pulls back to center @60fps
+        damping = -self._drag_swing_vel * 0.06   # friction @60fps
+        self._drag_swing_vel += push + spring + damping
+        self._drag_swing += self._drag_swing_vel
+        self.character.set_movement(self._swing_sprite(), -1)
+        self._render()
 
-            swing = self._drag_swing
-            speed = abs(swing)
-            if speed < 0.2:
-                move = "drag"
-            elif swing < 0:  # swinging left
-                if speed < 0.6:
-                    move = "drag_left_slow"
-                elif speed < 1.5:
-                    move = "drag_left_fast"
-                else:
-                    move = "drag_left_vfast"
-            else:  # swinging right
-                if speed < 0.6:
-                    move = "drag_right_slow"
-                else:
-                    move = "drag_right_fast"
-            self.character.set_movement(move, -1)
-            return True
-        return False
+    def _swing_sprite(self) -> str:
+        swing = self._drag_swing
+        speed = abs(swing)
+        if speed < 0.2:
+            return "drag"
+        if swing < 0:  # swinging left
+            if speed < 0.6:
+                return "drag_left_slow"
+            if speed < 1.5:
+                return "drag_left_fast"
+            return "drag_left_vfast"
+        if speed < 0.6:
+            return "drag_right_slow"
+        return "drag_right_fast"
+
+    def _on_drag_end(self, gesture, offset_x: float, offset_y: float, overlay: MonitorOverlay) -> None:
+        if not self._drag_active:
+            return
+        self._drag_active = False
+        # Detect monitor switch on drop
+        self._wander.set_active_monitor_at(self._wander.x, self._wander.y)
+        self._wander.x = max(self._wander.x_min, min(self._wander.x, self._wander.x_max))
+        self._wander.y = max(self._wander.y_min, min(self._wander.y, self._wander.y_max))
+
+        # On the ground already?
+        if self._wander.y >= self._wander.y_max - 5:
+            self._wander.y = self._wander.y_max
+            self._wander._start_sit()
+        else:
+            # Throw or drop based on release velocity
+            speed = (self._drag_vel_x ** 2 + self._drag_vel_y ** 2) ** 0.5
+            if speed > 0.3:
+                self._wander._start_throw(self._drag_vel_x, self._drag_vel_y)
+            else:
+                self._wander._start_fall()
+        self._render()
+
+    def _on_right_click(self, gesture, n_press: int, x: float, y: float, overlay: MonitorOverlay) -> None:
+        self._show_context_menu(overlay, x, y)
 
     # ------------------------------------------------------------------
     # Context menu
     # ------------------------------------------------------------------
 
-    def _show_context_menu(self, event: Gdk.EventButton) -> None:
-        menu = Gtk.Menu()
+    def _build_actions(self) -> Gio.SimpleActionGroup:
+        group = Gio.SimpleActionGroup()
 
-        # Project name header (non-clickable)
-        if self._project_name:
-            name_item = Gtk.MenuItem(label=self._project_name)
-            name_item.set_sensitive(False)
-            menu.append(name_item)
-            menu.append(Gtk.SeparatorMenuItem())
+        auto = Gio.SimpleAction.new_stateful("auto", None, GLib.Variant.new_boolean(True))
+        auto.connect("change-state", self._on_menu_auto)
+        group.add_action(auto)
 
-        # Auto mode — follow bridge
-        auto_item = Gtk.CheckMenuItem(label="Auto (follow Claude)")
-        auto_item.set_active(not self._manual_override)
-        auto_item.connect("toggled", self._on_menu_auto)
-        menu.append(auto_item)
+        wander = Gio.SimpleAction.new_stateful("wander", None, GLib.Variant.new_boolean(True))
+        wander.connect("change-state", self._on_menu_toggle_wander)
+        group.add_action(wander)
 
-        # Wander toggle
-        wander_item = Gtk.CheckMenuItem(label="Wander")
-        wander_item.set_active(self._wander_enabled)
-        wander_item.connect("toggled", self._on_menu_toggle_wander)
-        menu.append(wander_item)
+        scale = Gio.SimpleAction.new_stateful(
+            "scale", GLib.VariantType.new("d"), GLib.Variant.new_double(self._size / SPRITE_BASE))
+        scale.connect("change-state", self._on_menu_scale)
+        group.add_action(scale)
 
-        # Scale submenu
-        scale_item = Gtk.MenuItem(label="Scale")
-        scale_sub = Gtk.Menu()
-        current_scale = self._size / SPRITE_BASE
-        group = None
+        mascot = Gio.SimpleAction.new_stateful(
+            "mascot", GLib.VariantType.new("s"), GLib.Variant.new_string(self._mascot_path or ""))
+        mascot.connect("change-state", self._on_menu_mascot)
+        group.add_action(mascot)
+
+        for name, handler in (("kick", self._on_menu_kick), ("jump", self._on_menu_jump),
+                              ("clone-kill", self._on_menu_clone_kill), ("quit", self._on_menu_quit)):
+            action = Gio.SimpleAction.new(name, None)
+            action.connect("activate", handler)
+            group.add_action(action)
+
+        state = Gio.SimpleAction.new("state", GLib.VariantType.new("s"))
+        state.connect("activate", self._on_menu_set_state)
+        group.add_action(state)
+        return group
+
+    def _build_menu_model(self) -> Gio.Menu:
+        menu = Gio.Menu()
+
+        section = Gio.Menu()
+        section.append("Auto (follow Claude)", "pet.auto")
+        section.append("Wander", "pet.wander")
+        scale_sub = Gio.Menu()
         for s in SCALE_OPTIONS:
-            label = f"{s:.1f}x"
-            if s == current_scale:
-                label += " *"
-            radio = Gtk.RadioMenuItem(label=label, group=group)
-            group = radio
-            radio.set_active(abs(s - current_scale) < 0.01)
-            radio.connect("toggled", self._on_menu_scale, s)
-            scale_sub.append(radio)
-        scale_item.set_submenu(scale_sub)
-        menu.append(scale_item)
+            item = Gio.MenuItem.new(f"{s:.1f}x", None)
+            item.set_action_and_target_value("pet.scale", GLib.Variant.new_double(s))
+            scale_sub.append_item(item)
+        section.append_submenu("Scale", scale_sub)
+        mascots = self._list_mascots() if self._sprites_dir else []
+        if len(mascots) > 1:
+            mascot_sub = Gio.Menu()
+            for name, path in mascots:
+                item = Gio.MenuItem.new(name, None)
+                item.set_action_and_target_value("pet.mascot", GLib.Variant.new_string(path))
+                mascot_sub.append_item(item)
+            section.append_submenu("Mascot", mascot_sub)
+        menu.append_section(None, section)
 
-        # Mascot submenu (if sprites_dir is set and has multiple mascots)
-        if self._sprites_dir:
-            mascots = self._list_mascots()
-            if len(mascots) > 1:
-                mascot_item = Gtk.MenuItem(label="Mascot")
-                mascot_sub = Gtk.Menu()
-                group = None
-                for name, path in mascots:
-                    radio = Gtk.RadioMenuItem(label=name, group=group)
-                    group = radio
-                    radio.set_active(path == self._mascot_path)
-                    radio.connect("toggled", self._on_menu_mascot, path)
-                    mascot_sub.append(radio)
-                mascot_item.set_submenu(mascot_sub)
-                menu.append(mascot_item)
+        section = Gio.Menu()
+        section.append("Kick!", "pet.kick")
+        section.append("Jump!", "pet.jump")
+        section.append("Clone & Kill!", "pet.clone-kill")
+        menu.append_section(None, section)
 
-        menu.append(Gtk.SeparatorMenuItem())
-
-        # Movement actions
-        kick_item = Gtk.MenuItem(label="Kick!")
-        kick_item.connect("activate", self._on_menu_kick)
-        menu.append(kick_item)
-
-        jump_item = Gtk.MenuItem(label="Jump!")
-        jump_item.connect("activate", self._on_menu_jump)
-        menu.append(jump_item)
-
-        clone_item = Gtk.MenuItem(label="Clone & Kill!")
-        clone_item.connect("activate", self._on_menu_clone_kill)
-        menu.append(clone_item)
-
-        menu.append(Gtk.SeparatorMenuItem())
-
+        section = Gio.Menu()
         for state_name in TEST_STATES:
-            item = Gtk.MenuItem(label=state_name.capitalize())
-            item.connect("activate", self._on_menu_set_state, state_name)
-            menu.append(item)
+            item = Gio.MenuItem.new(state_name.capitalize(), None)
+            item.set_action_and_target_value("pet.state", GLib.Variant.new_string(state_name))
+            section.append_item(item)
+        menu.append_section(None, section)
 
-        menu.append(Gtk.SeparatorMenuItem())
+        section = Gio.Menu()
+        section.append("Quit", "pet.quit")
+        menu.append_section(None, section)
+        return menu
 
-        quit_item = Gtk.MenuItem(label="Quit")
-        quit_item.connect("activate", self._on_menu_quit)
-        menu.append(quit_item)
-
-        menu.show_all()
-        menu.popup_at_pointer(event)
-
-    def _on_fight_throw_start(self) -> bool:
-        """Start the throw after facing the attacker briefly."""
-        if self._wander and hasattr(self, '_pending_throw'):
-            vx, vy = self._pending_throw
-            del self._pending_throw
-            # Flip facing away from attacker (throw direction)
-            self._wander.direction = 1 if vx > 0 else -1
-            self._wander._start_throw(vx, vy)
-            # Clear fight after throw lands
-            GLib.timeout_add(2000, self._on_fight_defend_done)
-        return False
-
-    def _on_fight_defend_done(self) -> bool:
-        """Clear fight state after defender throw lands."""
-        if self._social:
-            self._social.clear_fight()
-        return False
+    def _show_context_menu(self, overlay: MonitorOverlay, x: float, y: float) -> None:
+        self._actions.lookup_action("auto").set_state(GLib.Variant.new_boolean(not self._manual_override))
+        popover = Gtk.PopoverMenu.new_from_model(self._build_menu_model())
+        popover.set_parent(overlay.sprite)
+        popover.set_has_arrow(False)
+        popover.set_pointing_to(Gdk.Rectangle(int(x), int(y), 1, 1))
+        popover.connect("closed", lambda p: GLib.idle_add(p.unparent))
+        popover.popup()
 
     def _on_wander_anim_timeout(self) -> bool:
-        self._wander_anim_timer_id = None
         if not self._manual_override:
             self.character.set_state("idle")
         return False
 
-    def _on_menu_kick(self, widget: Gtk.MenuItem) -> None:
+    def _on_menu_kick(self, action, param) -> None:
         if self._wander is not None:
             self._wander._start_kick()
 
-    def _on_menu_jump(self, widget: Gtk.MenuItem) -> None:
+    def _on_menu_jump(self, action, param) -> None:
         if self._wander is not None:
             self._wander._start_jump()
 
-    def _on_menu_clone_kill(self, widget: Gtk.MenuItem) -> None:
-        if self._clone_window is not None:
+    def _on_menu_clone_kill(self, action, param) -> None:
+        if self._clone is not None:
             return  # already running
         self._manual_override = True
         self.character.set_state("doubling")
 
     def _spawn_clone(self) -> None:
-        """Spawn a clone window that 'kills' the original."""
-        win_x, win_y = self.get_position()
+        """Spawn a clone sprite that 'kills' the original."""
+        x, y = self._sprite_pos()
         # Clone spawns behind the original and faces it
         facing = self._wander.direction if self._wander else -1
-        clone_x = win_x - facing * (self._size // 2)  # behind = opposite of facing
-        clone_facing = facing  # face toward original
-
-        # Clone has no label — offset y so sprite aligns with main window's sprite
-        clone_y = win_y + (self._label_height if self._label_on_top else 0)
-
+        clone_x = x - facing * (self._size // 2)  # behind = opposite of facing
         # Attack animation: stand, jump, kick, kick, stand victorious
-        self._clone_window = CloneWindow(
-            sprites=self.character._sprites,
-            indices=[27, 28, 29],
-            delay=300,
-            size=self._size,
-            x=clone_x,
-            y=clone_y,
-            facing=clone_facing,
-            on_done=self._on_clone_done,
-        )
-        logger.debug("Clone spawned at (%d, %d)", clone_x, win_y)
+        self._clone = {"x": clone_x, "y": y, "facing": facing,
+                       "indices": [27, 28, 29], "frame": 0}
+        self._clone_timer_id = GLib.timeout_add(300, self._on_clone_tick)
+        self._render()
+        logger.debug("Clone spawned at (%d, %d)", clone_x, y)
 
-    def _on_clone_done(self, clone_win: CloneWindow) -> None:
+    def _on_clone_tick(self) -> bool:
+        if self._clone is None:
+            return False
+        self._clone["frame"] += 1
+        if self._clone["frame"] >= len(self._clone["indices"]):
+            self._clone_timer_id = None
+            self._on_clone_done()
+            return False
+        self._render()
+        return True
+
+    def _on_clone_done(self) -> None:
         """Clone finished its attack. Original dies in place, clone stays."""
         # Keep clone alive while original plays death animation
+        self._clone["frame"] = len(self._clone["indices"]) - 1
         self.character.set_state("stumble")
         # After death sprites finish (3 frames × 300ms = 900ms), swap
         GLib.timeout_add(900, self._on_clone_death_done)
         logger.debug("Clone attack done, original dying")
 
     def _on_clone_death_done(self) -> bool:
-        """Original finished dying. Hide it, clone takes over."""
-        if self._clone_window is None:
+        """Original finished dying. It reappears where the clone stood."""
+        if self._clone is None:
             return False
-        clone_x, clone_y = self._clone_window.get_position()
-        # Hide original, then seamlessly appear at clone spot
-        self.hide()
-        self._clone_window.destroy()
-        self._clone_window = None
-        self._clone_falling = False
-
+        clone_x, clone_y = self._clone["x"], self._clone["y"]
+        self._clone = None
         if self._wander:
-            self._wander.x = float(clone_x)
-            self._wander.y = float(clone_y)
-        self.move(clone_x, clone_y)
-        self.show()
-
+            self._wander.x = float(clone_x - self._draw_offset_x)
+            self._wander.y = float(clone_y - self._draw_offset_y)
         self._manual_override = False
         self.character.set_state("idle")
+        self._render()
         logger.debug("Clone kill complete, moved to (%d, %d)", clone_x, clone_y)
         return False
 
-    def _on_menu_auto(self, widget: Gtk.CheckMenuItem) -> None:
-        self._manual_override = not widget.get_active()
+    def _on_menu_auto(self, action, value) -> None:
+        action.set_state(value)
+        self._manual_override = not value.get_boolean()
         if not self._manual_override:
             # Immediately sync with bridge
             state = self.bridge.get_state()
             if state:
                 self.character.set_state(state)
 
-    def _on_menu_toggle_wander(self, widget: Gtk.CheckMenuItem) -> None:
-        self._wander_enabled = widget.get_active()
+    def _on_menu_toggle_wander(self, action, value) -> None:
+        action.set_state(value)
+        self._wander_enabled = value.get_boolean()
 
-    def _on_menu_scale(self, widget: Gtk.RadioMenuItem, scale: float) -> None:
-        if not widget.get_active():
-            return
-        new_size = int(SPRITE_BASE * scale)
+    def _on_menu_scale(self, action, value) -> None:
+        action.set_state(value)
+        new_size = int(SPRITE_BASE * value.get_double())
         if new_size == self._size:
             return
-        win_x, win_y = self.get_position()
         self._size = new_size
-        total_h = new_size + self._label_height
-        self._drawing_area.set_size_request(new_size, total_h)
-        # set_size_request on the window itself forces the resize even when non-resizable
-        self.set_size_request(new_size, total_h)
+        for overlay in self._overlays:
+            overlay.sprite.set_size(new_size)
+            overlay.clone.set_size(new_size)
         self._init_wander()
-        self._wander.x = float(win_x)
-        # Snap to ground after rescale (pet size changed so old y is wrong)
-        self._wander.y = self._wander.y_max
-        self.move(int(self._wander.x), int(self._wander.y))
-        logger.debug("Scale changed to %.1fx (%dpx)", scale, new_size)
+        logger.debug("Scale changed to %.1fx (%dpx)", value.get_double(), new_size)
 
     def _list_mascots(self) -> list[tuple[str, str]]:
         """Return sorted list of (display_name, path) for mascots in sprites_dir."""
-        import os
         result = []
         for entry in sorted(os.listdir(self._sprites_dir)):
             path = os.path.join(self._sprites_dir, entry)
@@ -1408,16 +1243,19 @@ class PetWindow(Gtk.Window):
                 result.append((entry.replace("_", " ").title(), path))
         return result
 
-    def _on_menu_mascot(self, widget: Gtk.RadioMenuItem, path: str) -> None:
-        if not widget.get_active() or path == self._mascot_path:
+    def _on_menu_mascot(self, action, value) -> None:
+        path = value.get_string()
+        if path == self._mascot_path:
             return
         from sprite_character import SpriteCharacter
         new_char = SpriteCharacter(path)
         if not new_char._sprites:
             logger.warning("No sprites in %s, ignoring", path)
             return
+        action.set_state(value)
         self._mascot_path = path
         self.character = new_char
+        self._render()
         logger.info("Switched mascot to %s (%d sprites)", path, len(new_char._sprites))
         # Persist selection as default
         try:
@@ -1428,7 +1266,8 @@ class PetWindow(Gtk.Window):
         except Exception:
             pass
 
-    def _on_menu_set_state(self, widget: Gtk.MenuItem, state: str) -> None:
+    def _on_menu_set_state(self, action, value) -> None:
+        state = value.get_string()
         self._manual_override = True
         self.character.set_state(state)
 
@@ -1442,8 +1281,7 @@ class PetWindow(Gtk.Window):
         if cfg.get("loop", True):
             n_frames = cfg.get("frames") or len(cfg.get("sprites", [1]))
             duration_ms = cfg["delay"] * n_frames * 3
-            self._menu_timeout_id = GLib.timeout_add(
-                duration_ms, self._on_menu_timeout)
+            self._menu_timeout_id = GLib.timeout_add(duration_ms, self._on_menu_timeout)
 
     def _on_menu_timeout(self) -> bool:
         """Return to idle after a menu-selected looping animation preview."""
@@ -1452,40 +1290,26 @@ class PetWindow(Gtk.Window):
         self._menu_timeout_id = None
         return False
 
-    def _on_menu_quit(self, widget: Gtk.MenuItem) -> None:
-        self._cleanup()
-        Gtk.main_quit()
+    def _on_menu_quit(self, action, param) -> None:
+        self.shutdown()
+        if self._on_quit is not None:
+            self._on_quit()
 
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
 
-    def _cleanup(self) -> None:
+    def shutdown(self) -> None:
         self._stop_timers()
-        if self._menu_timeout_id is not None:
-            GLib.source_remove(self._menu_timeout_id)
-            self._menu_timeout_id = None
+        for timer in (self._menu_timeout_id, self._clone_timer_id):
+            if timer is not None:
+                GLib.source_remove(timer)
+        self._menu_timeout_id = None
+        self._clone_timer_id = None
         try:
             self.bridge.stop_watching()
         except Exception:
             logger.exception("Error stopping bridge")
-        if self._social:
-            self._social.cleanup()
-
-    def _on_realize(self, widget: Gtk.Window) -> None:
-        """Disable compositor shadow/border on this window."""
-        try:
-            xid = self.get_window().get_xid()
-            subprocess.Popen(
-                ["xprop", "-id", str(xid),
-                 "-f", "_COMPTON_SHADOW", "32c",
-                 "-set", "_COMPTON_SHADOW", "0"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            logger.debug("Set _COMPTON_SHADOW=0 on xid %d", xid)
-        except Exception:
-            logger.debug("Could not set _COMPTON_SHADOW")
-
-    def _on_destroy(self, widget: Gtk.Window) -> None:
-        self._cleanup()
-        Gtk.main_quit()
+        for overlay in self._overlays:
+            overlay.destroy()
+        self._overlays = []

@@ -1,6 +1,6 @@
-.PHONY: run stop install uninstall test-states test-pet clean help
+.PHONY: run start stop debug install uninstall test-states help
 
-NAMES = alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango
+CLAUDE_CONFIG_DIRS ?= $(HOME)/.claude $(HOME)/.claude-work
 
 # Default: run the pet
 run:
@@ -11,42 +11,27 @@ start:
 	python3 main.py &
 	@echo "Claude Pet started in background (PID: $$!)"
 
-# Stop the pet (kills default instance and all per-project instances)
+# Stop the pet
 stop:
-	@found=false; \
-	for pidfile in /tmp/claude-pet*.pid; do \
-		[ -f "$$pidfile" ] || continue; \
-		pid=$$(cat "$$pidfile" 2>/dev/null); \
-		if [ -n "$$pid" ] && kill "$$pid" 2>/dev/null; then \
-			echo "Stopped Claude Pet (PID $$pid, $$pidfile)"; \
-			found=true; \
-		fi; \
-		rm -f "$$pidfile"; \
-	done; \
-	rm -f /tmp/claude-pet-*-pos; \
-	$$found || echo "Claude Pet not running"
+	@if [ -f /tmp/claude-pet.pid ] && kill "$$(cat /tmp/claude-pet.pid)" 2>/dev/null; then \
+		echo "Stopped Claude Pet"; \
+	else \
+		echo "Claude Pet not running"; \
+	fi; \
+	rm -f /tmp/claude-pet.pid /tmp/claude-pet-state; \
+	rm -rf /tmp/claude-pet-sessions
 
 # Run with debug logging
 debug:
 	python3 main.py --debug
 
-# Install hooks and print setup instructions
+# Install hooks into every Claude Code config dir (override with CLAUDE_CONFIG_DIRS="...")
 install:
-	bash install.sh
+	bash install.sh $(CLAUDE_CONFIG_DIRS)
 
 # Uninstall hooks
 uninstall:
-	bash uninstall.sh
-
-# Spawn a test pet with a random NATO name
-test-pet:
-	@name=$$(echo $(NAMES) | tr ' ' '\n' | shuf -n1); \
-	hash=$$(echo "$$name-$$$$" | md5sum | cut -c1-8); \
-	echo "Spawning test pet: $$name ($$hash)"; \
-	python3 main.py --debug \
-		--state-file /tmp/claude-pet-$$hash-state \
-		--pid-file /tmp/claude-pet-$$hash.pid \
-		--project-name $$name &
+	bash uninstall.sh $(CLAUDE_CONFIG_DIRS)
 
 # Test: cycle through all states (useful for development)
 test-states:
@@ -70,8 +55,7 @@ help:
 	@echo "  make start         Run in background"
 	@echo "  make stop          Kill the pet"
 	@echo "  make debug         Run with debug logging"
-	@echo "  make install       Install hooks and setup"
+	@echo "  make install       Install hooks (CLAUDE_CONFIG_DIRS=\"~/.claude ~/.claude-work\")"
 	@echo "  make uninstall     Remove hooks"
-	@echo "  make test-pet      Spawn a test pet (random name)"
 	@echo "  make test-states   Cycle through all states"
 	@echo "  make test-STATE    Set a specific state (e.g., make test-attention)"

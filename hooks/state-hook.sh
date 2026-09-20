@@ -1,79 +1,63 @@
 #!/bin/bash
 # Claude Pet state hook
 # Usage: state-hook.sh <state>
-# Called by Claude Code hooks to update pet state.
-# Reads JSON from stdin to extract cwd for per-project instance support.
+# Called by Claude Code hooks to update the pet's state.
+# Reads the hook JSON from stdin to track which sessions are alive.
 #
-# Auto-starts a per-project pet if not already running (uses PID file).
-# Valid states: idle, thinking, working, attention, celebrating, doubling
+# One pet for the whole desktop: the first session starts it, every session
+# feeds it states, and it is only stopped when the last session ends.
+# Valid states: idle, thinking, working, attention, celebrating, doubling, stop
 
 PET_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+STATE_FILE="/tmp/claude-pet-state"
+PID_FILE="/tmp/claude-pet.pid"
+SESSIONS_DIR="/tmp/claude-pet-sessions"
 
 if [ -z "$1" ]; then
     echo "Usage: state-hook.sh <state>" >&2
     exit 1
 fi
 
-# Read stdin JSON and extract cwd for per-project identification
-PROJECT_INFO=$(python3 -c "
-import json, hashlib, os, sys
+SESSION_ID=$(python3 -c "
+import json, sys
 try:
-    data = json.load(sys.stdin)
+    print(json.load(sys.stdin).get('session_id', ''))
 except Exception:
-    data = {}
-cwd = data.get('cwd', '')
-if cwd:
-    name = os.path.basename(cwd)
-    h = hashlib.md5(cwd.encode()).hexdigest()[:8]
-    print(f'{name}\n{h}')
-else:
-    print('\n')
+    print('')
 " 2>/dev/null)
+SESSION_ID=${SESSION_ID//[^A-Za-z0-9_-]/}
 
-PROJECT_NAME=$(echo "$PROJECT_INFO" | head -1)
-PROJECT_HASH=$(echo "$PROJECT_INFO" | tail -1)
+mkdir -p "$SESSIONS_DIR"
 
-if [ -n "$PROJECT_HASH" ]; then
-    STATE_FILE="/tmp/claude-pet-${PROJECT_HASH}-state"
-    PID_FILE="/tmp/claude-pet-${PROJECT_HASH}.pid"
-else
-    STATE_FILE="/tmp/claude-pet-state"
-    PID_FILE="/tmp/claude-pet.pid"
-fi
+pet_running() {
+    [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null
+}
 
-# Handle "stop" — kill the pet for this project and clean up
-if [ "$1" = "stop" ]; then
+start_pet() {
+    nohup python3 "$PET_DIR/main.py" &>/dev/null &
+    disown
+    sleep 0.5  # give main.py time to write its PID file
+}
+
+stop_pet() {
     if [ -f "$PID_FILE" ]; then
-        pid=$(cat "$PID_FILE" 2>/dev/null)
-        if [ -n "$pid" ]; then
-            kill "$pid" 2>/dev/null
-        fi
+        kill "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null
         rm -f "$PID_FILE"
     fi
     rm -f "$STATE_FILE"
-    rm -f "/tmp/claude-pet-${PROJECT_HASH}-pos"
+}
+
+if [ "$1" = "stop" ]; then
+    [ -n "$SESSION_ID" ] && rm -f "$SESSIONS_DIR/$SESSION_ID"
+    # Sessions killed without a SessionEnd would keep the pet alive forever,
+    # so also stop when no claude process is left at all.
+    if [ -z "$(ls -A "$SESSIONS_DIR" 2>/dev/null)" ] || ! pgrep -x claude >/dev/null; then
+        rm -f "$SESSIONS_DIR"/*
+        stop_pet
+    fi
     exit 0
 fi
 
-# Auto-start pet if not running (PID file check)
-need_start=true
-if [ -f "$PID_FILE" ]; then
-    pid=$(cat "$PID_FILE" 2>/dev/null)
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        need_start=false
-    fi
-fi
-
-if $need_start; then
-    # Ensure DISPLAY is set for GTK (hooks may not inherit it)
-    export DISPLAY="${DISPLAY:-:0}"
-    EXTRA_ARGS="--state-file $STATE_FILE --pid-file $PID_FILE"
-    if [ -n "$PROJECT_NAME" ]; then
-        EXTRA_ARGS="$EXTRA_ARGS --project-name $PROJECT_NAME"
-    fi
-    nohup python3 "$PET_DIR/main.py" $EXTRA_ARGS &>/dev/null &
-    disown
-    sleep 0.5  # give main.py time to write its own PID file
-fi
-
+[ -n "$SESSION_ID" ] && touch "$SESSIONS_DIR/$SESSION_ID"
+pet_running || start_pet
 echo "$1" > "$STATE_FILE"

@@ -1,21 +1,23 @@
 #!/bin/bash
 # Install Claude Pet hooks into Claude Code settings.
 #
-# Adds hook entries to ~/.claude/settings.json so Claude Code
+# Adds hook entries to <config-dir>/settings.json so Claude Code
 # calls state-hook.sh on session, prompt, permission, stop, and compact events.
+#
+# Usage: install-hooks.sh [config-dir ...]   (default: ~/.claude)
+# Pass every CLAUDE_CONFIG_DIR you use, e.g. ~/.claude ~/.claude-work.
 #
 # Safe to run multiple times — existing hooks are preserved and
 # claude-pet hooks are only added if not already present.
 
 set -e
 
-SETTINGS_FILE="$HOME/.claude/settings.json"
-SETTINGS_DIR="$HOME/.claude"
 HOOK_SCRIPT="$(cd "$(dirname "$0")" && pwd)/state-hook.sh"
+CONFIG_DIRS=("$@")
+[ ${#CONFIG_DIRS[@]} -eq 0 ] && CONFIG_DIRS=("$HOME/.claude")
 
-echo "  Installing Claude Code hooks..."
-
-# Make sure the .claude directory exists
+for SETTINGS_DIR in "${CONFIG_DIRS[@]}"; do
+echo "  Installing Claude Code hooks into $SETTINGS_DIR/settings.json..."
 mkdir -p "$SETTINGS_DIR"
 
 # Use python3 for reliable JSON manipulation
@@ -26,7 +28,7 @@ import shutil
 import sys
 from pathlib import Path
 
-settings_file = Path(os.path.expanduser("~/.claude/settings.json"))
+settings_file = Path("$SETTINGS_DIR/settings.json")
 hook_script = Path("$HOOK_SCRIPT")
 
 # The hooks we want to install (new format with "hooks" array and "type": "command")
@@ -172,5 +174,6 @@ with open(settings_file, "w") as f:
 print(f"  Hooks written to {settings_file}")
 print("  Installed hooks for: " + ", ".join(pet_hooks.keys()))
 PYEOF
+done
 
 echo "  Done installing hooks."

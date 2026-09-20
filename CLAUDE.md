@@ -1,22 +1,21 @@
 # Claude Pet - Project Guide
 
-Shimeji-style desktop pet for Claude Code. A transparent, always-on-top GTK3 window that reflects Claude Code's state through pixel art animations. Runs on X11 with picom compositor on Linux/i3.
+Shimeji-style desktop pet for Claude Code. A transparent, click-through overlay that reflects Claude Code's state through pixel art animations. Native Wayland: GTK4 + wlr-layer-shell (gtk4-layer-shell), developed on Hyprland/Omarchy. One pet for the whole desktop, shared by every Claude Code session.
 
 ## Architecture
 
-5 Python files, no build system (runs directly with system python3):
+4 Python files, no build system (runs directly with system python3):
 
-- **main.py** - Entry point. Parses args (`--size`, `--mascot`, `--state-file`, `--pid-file`, `--project-name`, `--debug`), loads config from `~/.config/claude-pet/config.json`, resolves mascot path, creates `SpriteCharacter` + `ClaudeBridge` + `SocialEngine` + `PetWindow`, starts GTK main loop. Per-project single-instance via PID files at `/tmp/claude-pet-{hash}.pid`. Pets spawn at a random X along the bottom of the primary monitor.
-- **pet_window.py** - The core. Contains `PetWindow` (GTK POPUP window), `WanderEngine` (movement AI), and `CloneWindow` (temporary overlay for clone-kill animation). Runs at 60fps via GLib timer. Integrates social directives from `SocialEngine`.
+- **main.py** - Entry point. Re-execs itself with `libgtk4-layer-shell` in `LD_PRELOAD` (the library must load before libwayland-client, which a language binding can't guarantee — this is the documented approach), parses args (`--size`, `--mascot`, `--state-file`, `--pid-file`, `--debug`), loads config from `~/.config/claude-pet/config.json`, resolves the mascot, creates `SpriteCharacter` + `ClaudeBridge` + `Pet`, runs a GLib main loop. Single instance via `/tmp/claude-pet.pid` (the PID file is only removed by the process that owns it).
+- **pet_window.py** - The core. `MonitorOverlay` (one full-output layer-shell surface per monitor, `overlay` layer, transparent, input region limited to the sprite), `SpriteArea` (a small `Gtk.DrawingArea` moved inside a `Gtk.Fixed`), `WanderEngine` (movement AI) and `Pet` (the controller: 60fps GLib timer, drag/throw gestures, right-click `Gtk.PopoverMenu`, clone-kill animation, bridge integration). Positions are global desktop coordinates; each overlay shows the sprite only if it touches its monitor, so dragging across monitors just works.
 - **sprite_character.py** - Loads shime*.png sprites from mascot directories. Defines two animation config dicts: `_state_config` (Claude states) and `_move_config` (movement animations). Handles frame advancement, looping, and state transitions.
-- **claude_bridge.py** - Polls the state file (per-project: `/tmp/claude-pet-{hash}-state`) every 300ms for state changes. Has a 60-second idle timeout that auto-transitions to idle if no state change occurs. Valid states: idle, thinking, working, attention, celebrating, doubling.
-- **social_engine.py** - Inter-process social behaviors. Pets share position via `/tmp/claude-pet-{hash}-pos` files and use that data to avoid sitting near each other, face nearby peers, and fight.
+- **claude_bridge.py** - Polls the state file (`/tmp/claude-pet-state`) every 300ms for state changes. Has a 60-second idle timeout that auto-transitions to idle if no state change occurs. Valid states: idle, thinking, working, attention, celebrating, doubling.
 
 ## Animation System (sprite_character.py)
 
 ### Two config dicts drive all animations:
 
-**`_state_config`** - State-override animations (thinking, working, celebrating, error, etc.). Triggered by Claude hooks, social engine, or wander engine. Freeze movement and take priority over move animations.
+**`_state_config`** - State-override animations (thinking, working, celebrating, error, etc.). Triggered by Claude hooks, the menu, or the wander engine. Freeze movement and take priority over move animations.
 **`_move_config`** - Movement animations (walk, sit, climb, kick, jump, fall, drag, etc.)
 
 ### Config format:
@@ -46,16 +45,16 @@ When Claude state is working, thinking, error, attention, doubling, clone_frozen
 ## State Triggering - Three Sources
 
 ### 1. Claude Code hooks (claude_bridge.py)
-Hooks are configured in `~/.claude/settings.json` (global) and call `hooks/state-hook.sh` which reads JSON from stdin to extract `cwd`, derives a per-project hash, and writes to per-project state files (`/tmp/claude-pet-{hash}-state`). Bridge polls this file every 300ms.
+Hooks are configured in each Claude Code config dir's `settings.json` (`hooks/install-hooks.sh ~/.claude ~/.claude-work`) and call `hooks/state-hook.sh`, which reads the hook JSON from stdin for the `session_id`, keeps `/tmp/claude-pet-sessions/<session_id>` as the set of live sessions, starts the pet if it is not running, and writes the state to `/tmp/claude-pet-state`. Bridge polls this file every 300ms. All sessions (including subagents in other folders) feed the same pet — last writer wins.
 
-Current hook mapping (in `~/.claude/settings.json`, installed by `hooks/install-hooks.sh`):
-- **SessionStart** -> "idle" (pet resets when Claude session begins; auto-starts the pet if not running)
+Current hook mapping (installed by `hooks/install-hooks.sh`):
+- **SessionStart** -> "idle" (registers the session; auto-starts the pet if not running)
 - **UserPromptSubmit** -> "thinking" (user sent a message, Claude is processing the prompt)
 - **PreToolUse** -> "working" (tool is about to execute - the actual work)
 - **PermissionRequest** -> "attention" (Claude needs permission approval)
 - **Stop** -> "celebrating" (Claude finished - plays celebrate animation, then auto-transitions to idle)
 - **PreCompact** -> "doubling" (Claude is compacting context - triggers clone-kill animation)
-- **SessionEnd** -> "stop" (kills the pet for this project and cleans up state/PID files)
+- **SessionEnd** -> "stop" (unregisters the session; the pet is killed only when no sessions remain, or when no `claude` process exists at all — sessions that died without SessionEnd)
 
 The typical flow: UserPromptSubmit(thinking) -> PreToolUse(working) -> PreToolUse(working) -> ... -> Stop(celebrating) -> idle.
 
@@ -64,7 +63,7 @@ Note: PostToolUse and PostToolUseFailure are intentionally not hooked — they f
 - Bridge has a 60s idle timeout: if no state change for 60s, auto-transitions to idle.
 - Bridge respects `_manual_override` flag - won't change state while user is controlling via menu.
 
-### 2. Right-click context menu (pet_window.py `_on_menu_set_state`)
+### 2. Right-click context menu (pet_window.py `_on_menu_set_state`, a `Gtk.PopoverMenu` over `Gio.Menu` + `Gio.SimpleActionGroup` "pet")
 - Sets `_manual_override = True` so bridge won't interfere.
 - For **looping** states (loop:True): sets a GLib timer for 3 full cycles, then returns to idle and clears override.
 - For **non-looping** states (loop:False): the animation plays its `"loops"` count and auto-transitions via `tick()`. Override is cleared in `_on_frame_tick` when it detects the state changed and `is_busy` is False.
@@ -98,91 +97,28 @@ Note: PostToolUse and PostToolUseFailure are intentionally not hooked — they f
 | 42-43 | Thinking animation / error bookend |
 | 44-46 | Doubling (clone spawn) animation |
 | 47-48 | Working animation (at laptop) |
-| 27-29 | Attack animation (used in clone-kill and fights) |
+| 27-29 | Attack animation (used in clone-kill) |
 | 49-50 | Celebrating animation |
 
 ## Clone-Kill Animation Sequence
 
 1. `set_state("doubling")` -> plays sprites [44, 45, 46] once, transitions to "clone_frozen"
 2. `_on_frame_tick` detects doubling->clone_frozen transition -> calls `_spawn_clone()`
-3. `CloneWindow` spawns behind original, plays attack sprites [27, 28, 29], calls `_on_clone_done`
+3. A clone sprite (`Pet._clone`, drawn by each overlay's second `SpriteArea`) appears behind the original, plays attack sprites [27, 28, 29] on a 300ms timer, then `_on_clone_done`
 4. Original plays "stumble" [19, 18, 20], then after 900ms `_on_clone_death_done` swaps positions
-5. Original teleports to clone position, clone window destroyed, state returns to idle
-
-## Social Behaviors (social_engine.py)
-
-When multiple pet instances are running, they interact via position files.
-
-### Position Sharing
-
-Each pet writes its position to `/tmp/claude-pet-{hash}-pos` every 10 frames (~166ms). Format: CSV line with `x,y,width,height,facing,state,move_state,monitor_idx,fight_target,timestamp`. Written atomically via temp file + `os.rename()`. Peers are read every 300ms; entries older than 3 seconds are discarded.
-
-### No Sitting Near Others
-
-When a walking pet is near a peer on the same monitor (within `1.5 * pet_size`), `_pick_behavior()` excludes SIT from its weighted random selection. The already-sitting pet stays put; the walking one avoids sitting down. Implemented via a `block_sit` flag in the `SocialDirective`.
-
-### Face Each Other
-
-When sitting and the nearest peer on the same monitor is within `3 * pet_size`, the sitting pet's facing direction is overridden toward the peer. Only applies during the SIT movement state.
-
-### Fight
-
-**Trigger:** Two idle pets both walking on ground, within `0.6 * pet_size` (sprites nearly touching), random ~1% chance per second. 10-second cooldown between fights.
-
-**Protocol — two-way handshake (via `fight_target` field in position file):**
-1. Pet A writes `fight_target=B_hash` in its position file (proposal)
-2. Pet B reads the proposal, checks it's close/idle/walking, writes `fight_target=A_hash` back (counter-proposal)
-3. Both pets read the mutual targeting — handshake complete. Re-checks proximity at confirmation time
-4. Smaller hash = attacker, larger hash = defender
-5. Fight directives are delivered exactly once (`_fight_delivered` flag prevents re-triggering)
-6. Stale proposals expire after 3 seconds (`FIGHT_PROPOSAL_TTL`)
-
-This ensures fights never happen one-sided — both pets must agree and be close.
-
-**Attacker:** plays `attack` state [27, 28, 29] -> transitions to `celebrating` [49, 50]. Fight clears on the attack->celebrating transition.
-
-**Defender:** facing flipped away from attacker, receives a small shove via `_start_throw(vx, vy)` (vx ~2-3, vy ~-1). Existing throw physics handles the rest. Fight clears after a 2-second timer.
-
-The `"attack"` state in `_state_config`:
-```python
-"attack": {"sprites": [27, 28, 29], "delay": 200, "loop": False, "loops": 1, "next": "celebrating"}
-```
-
-### Cleanup
-
-Position files are removed on shutdown (`social.cleanup()` in `PetWindow._cleanup` and `main.py`), by `state-hook.sh` on SessionEnd, and by `make stop`.
-
-## Multi-Instance Support
-
-Each Claude Code session spawns its own pet, identified by project folder:
-
-- `state-hook.sh` reads `cwd` from hook stdin JSON, derives `project_name` (basename) and an 8-char MD5 hash of the full path
-- Per-project files: `/tmp/claude-pet-{hash}-state` and `/tmp/claude-pet-{hash}.pid`
-- `main.py` accepts `--project-name`, `--pid-file`, `--state-file` args
-- `SessionEnd` hook kills the pet for that specific project
-- `make stop` kills all pet instances (globs `/tmp/claude-pet*.pid`) and removes position files
-
-## Project Name Label
-
-When `--project-name` is set, a floating label is drawn near the sprite via cairo:
-
-- **LABEL_HEIGHT = 20** — extra window height for the label
-- **Label on top** by default (sprite shifted down by `LABEL_HEIGHT`)
-- **Label on bottom** when on the ceiling (`_label_on_top = False`)
-- **Label follows sprite x-offset** at 30% intensity during wall climbs (stays near sprite, slightly toward center)
-- White bold text with dark outline (4-corner shadow) for readability on any background
-- `WanderEngine` uses separate `pet_size` (width) and `pet_height` (height) so the label height doesn't affect x-bounds
-- Project name also shown as a disabled menu item at the top of the right-click context menu
+5. Original teleports to the clone position, clone sprite hidden, state returns to idle
 
 ## Key Technical Details
 
-- **GTK POPUP window** - bypasses window manager (no tiling in i3). Uses `Gdk.WindowTypeHint.DOCK` and sets `WM_CLASS="claude-pet"`. A 500ms `_xraise_above` timer uses raw python-xlib to call `XConfigureWindow(Above)` on the pet's X11 id — this reliably keeps the pet above other "keep_above" overlays (e.g. xborder-style rainbow borders) regardless of launch order. GTK3's `Gdk.Window.raise_()` wrapper is unreliable for POPUP/override-redirect windows under i3.
+- **Layer-shell overlays** - one `Gtk.Window` per monitor, anchored to all four edges with exclusive zone -1 (covers the whole output, including bar areas), layer `overlay` (above fullscreen windows), keyboard mode `none`, namespace `claude-pet` (visible in `hyprctl layers`). Transparent via CSS `window.claude-pet { background-color: transparent; }`. `Gdk.Surface.set_input_region` is updated whenever a sprite moves so only the sprite rectangles take clicks.
+- **Drawing cost** - only the 128x128 `SpriteArea` nodes are redrawn (`queue_draw` on the sprite, not the window), and only when position, frame or state changed; the timer itself runs at 60fps. Idle CPU ~1%.
+- **Gestures** - `Gtk.GestureDrag` (button 1) for drag/throw with the implicit grab, so the drag keeps tracking when the pointer leaves the sprite or the monitor; `Gtk.GestureClick` (button 3) for the menu.
+- **Monitor hotplug** - `Gdk.Display.get_monitors()` "items-changed" rebuilds the overlays and the wander bounds.
 - **60fps frame timer** - `FRAME_INTERVAL_MS = 1000 // 60 = 16ms`. Character `_TICK_MS` matches this.
 - **Sprite fallback** - if a sprite index is missing, falls back to the lowest available sprite number (line 167-175 of sprite_character.py). This means animations work even if a mascot is missing some sprites.
-- **Multi-monitor** - WanderEngine tracks active monitor, switches on drag-drop. Pet is constrained to one monitor at a time.
+- **Multi-monitor** - WanderEngine tracks the active monitor (global coordinates), switches on drag-drop. Pet is constrained to one monitor at a time.
 - **Config persistence** - mascot selection saved to `~/.config/claude-pet/config.json`.
 - **Sprites skip tiny files** - PNGs under 500 bytes are skipped (assumed blank/transparent).
-- **Picom shadow disabled** - uses xprop to set `_COMPTON_SHADOW=0` on the window.
 
 ## Running
 
@@ -190,11 +126,10 @@ When `--project-name` is set, a floating label is drawn near the sprite via cair
 make run          # foreground
 make debug        # with debug logging (activates "active" wander mode)
 make start        # background
-make stop         # kill all pet instances
-make test-pet     # spawn a test pet with random NATO name (debug mode)
+make stop         # kill the pet
 make test-states  # cycle through all states
 make test-working # set a specific state
-make install      # install hooks + launcher
+make install      # install hooks (into ~/.claude and ~/.claude-work)
 make uninstall    # remove hooks
 ```
 
