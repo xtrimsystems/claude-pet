@@ -63,12 +63,13 @@ Claude Pet installs hooks into Claude Code that write state changes to a file. T
 | Idle for 60s | Idle (wandering around) |
 | Last session ends | Pet exits |
 
-When idle, the pet wanders the screen Shimeji-style — walking along edges, climbing walls, sitting, kicking, jumping. Drag it around, throw it, or right-click it for the menu (scale, mascot, poses, quit).
+When idle, the pet wanders the screen Shimeji-style — walking along edges, climbing walls, sitting, kicking, jumping, and now and then riding a scooter across the screen or pulling a finger gun with a heart. Drag it around, throw it, or right-click it for the menu (scale, mascot, poses, scooter, finger gun, quit).
 
 The hook script registers every live session in `/tmp/claude-pet-sessions/`; the pet is started by the first one and stopped by the last one, so several sessions, terminals and subagents share a single pet.
 
 ```bash
 make test-states   # cycle the pet through all states
+make sprites       # redraw the generated sprites (tools/draw_scooter.py, tools/draw_finger_gun.py)
 make stop          # kill it
 ```
 

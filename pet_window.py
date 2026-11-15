@@ -72,6 +72,7 @@ class Move(enum.Enum):
     GOOD_LAND = "good_land"
     HARD_LAND = "hard_land"
     SIT = "sit"
+    SCOOTER = "scooter"
 
 
 class WanderEngine:
@@ -99,12 +100,17 @@ class WanderEngine:
     JUMP_VX_SMALL = 1.5            # horizontal push for small jumps
     JUMP_VX_BIG = 7.0              # horizontal push for big jumps (wider arc)
     JUMP_GRAVITY = 0.12            # gravity during jump
+    SCOOTER_SPEED_START = 1.0      # px/frame when setting off
+    SCOOTER_SPEED_MAX = 4.5        # px/frame cruising (~270 px/sec)
+    SCOOTER_ACCEL = 0.06           # px/frame² until cruising speed
+    SCOOTER_BRAKE = 0.05           # speed cap per px left to the edge
 
     # Behavior weights (higher = more likely to be chosen)
     #   sit:   stay put          walk:  walk on ground
     #   climb: climb nearest edge
-    CALM_WEIGHTS   = {"sit": 120, "walk": 80, "climb": 20, "kick": 10, "jump": 4, "clone_kill": 3, "error": 3}
-    ACTIVE_WEIGHTS = {"sit":  50, "walk": 150, "climb": 40, "kick": 18, "jump": 7, "clone_kill": 5, "error": 5}
+    #   scooter: ride across the screen to the far edge
+    CALM_WEIGHTS   = {"sit": 120, "walk": 80, "climb": 20, "kick": 10, "jump": 4, "scooter": 6, "finger_gun": 4, "clone_kill": 3, "error": 3}
+    ACTIVE_WEIGHTS = {"sit":  50, "walk": 150, "climb": 40, "kick": 18, "jump": 7, "scooter": 12, "finger_gun": 6, "clone_kill": 5, "error": 5}
     STUMBLE_CHANCE = 0.0003      # per frame while walking (~2% per second)
 
     # Sit durations (frames at 60 fps)
@@ -145,6 +151,7 @@ class WanderEngine:
         self._jump_vx = 0.0
         self._jump_vy = 0.0
         self._jump_peak_y = 0.0
+        self._scooter_speed = 0.0
         self.pending_anim: str | None = None
 
     # --- active monitor ---
@@ -196,7 +203,9 @@ class WanderEngine:
                     return Move.KICK
                 elif behavior == "jump":
                     return Move.JUMP
-                elif behavior in ("clone_kill", "error"):
+                elif behavior == "scooter":
+                    return Move.SCOOTER
+                elif behavior in ("clone_kill", "error", "finger_gun"):
                     return behavior
         return Move.SIT
 
@@ -211,7 +220,7 @@ class WanderEngine:
     def tick(self, anim_state: str) -> tuple[int, int]:
         if anim_state in ("working", "thinking", "error", "attention",
                           "doubling", "clone_frozen", "stumble",
-                          "celebrating", "attack"):
+                          "celebrating", "attack", "finger_gun"):
             return int(self.x), int(self.y)
 
         if self.move_state == Move.WALK_GROUND:
@@ -238,6 +247,8 @@ class WanderEngine:
             self._do_hard_land()
         elif self.move_state == Move.SIT:
             self._do_sit()
+        elif self.move_state == Move.SCOOTER:
+            self._do_scooter()
 
         self.x = max(self.x_min, min(self.x, self.x_max))
         self.y = max(self.y_min, min(self.y, self.y_max))
@@ -352,7 +363,7 @@ class WanderEngine:
     def _transition(self) -> None:
         """Pick the next behavior using weighted random selection."""
         nxt = self._pick_behavior()
-        if nxt in ("clone_kill", "error"):
+        if nxt in ("clone_kill", "error", "finger_gun"):
             self.pending_anim = nxt
             self._start_sit()
         elif nxt == Move.SIT:
@@ -365,6 +376,8 @@ class WanderEngine:
             self._start_kick()
         elif nxt == Move.JUMP:
             self._start_jump()
+        elif nxt == Move.SCOOTER:
+            self._start_scooter()
         else:
             self._start_walk()
 
@@ -379,6 +392,26 @@ class WanderEngine:
         self._walk_speed = random.uniform(self.WALK_SPEED_MIN, self.WALK_SPEED_MAX)
         lo, hi = self._walk_range()
         self._walk_timer = random.randint(lo, hi)
+
+    def _start_scooter(self) -> None:
+        self.move_state = Move.SCOOTER
+        room_left = self.x - self.x_min
+        room_right = self.x_max - self.x
+        self.direction = 1 if room_right > room_left else -1
+        self._scooter_speed = self.SCOOTER_SPEED_START
+
+    def _do_scooter(self) -> None:
+        self.y = self.y_max
+        distance_to_edge = (self.x_max - self.x) if self.direction > 0 else (self.x - self.x_min)
+        self._scooter_speed = min(self._scooter_speed + self.SCOOTER_ACCEL,
+                                  self.SCOOTER_SPEED_MAX,
+                                  self.SCOOTER_SPEED_START + distance_to_edge * self.SCOOTER_BRAKE)
+        self.x += self._scooter_speed * self.direction
+        if self.x_min < self.x < self.x_max:
+            return
+        self.x = max(self.x_min, min(self.x, self.x_max))
+        self.direction = -self.direction
+        self._start_sit()
 
     def _start_kick(self) -> None:
         self.move_state = Move.KICK
@@ -861,6 +894,7 @@ class Pet:
                 Move.SIT: "sit",
                 Move.KICK: "kick",
                 Move.JUMP: "jump_launch",
+                Move.SCOOTER: "scooter",
             }
             move_name = move_map.get(self._wander.move_state, "")
             # Climb sprites face left; face toward the wall
@@ -1077,6 +1111,7 @@ class Pet:
         group.add_action(mascot)
 
         for name, handler in (("kick", self._on_menu_kick), ("jump", self._on_menu_jump),
+                              ("scooter", self._on_menu_scooter),
                               ("clone-kill", self._on_menu_clone_kill), ("quit", self._on_menu_quit)):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", handler)
@@ -1112,6 +1147,10 @@ class Pet:
         section = Gio.Menu()
         section.append("Kick!", "pet.kick")
         section.append("Jump!", "pet.jump")
+        section.append("Scooter!", "pet.scooter")
+        finger_gun = Gio.MenuItem.new("Finger gun!", None)
+        finger_gun.set_action_and_target_value("pet.state", GLib.Variant.new_string("finger_gun"))
+        section.append_item(finger_gun)
         section.append("Clone & Kill!", "pet.clone-kill")
         menu.append_section(None, section)
 
@@ -1148,6 +1187,10 @@ class Pet:
     def _on_menu_jump(self, action, param) -> None:
         if self._wander is not None:
             self._wander._start_jump()
+
+    def _on_menu_scooter(self, action, param) -> None:
+        if self._wander is not None:
+            self._wander._start_scooter()
 
     def _on_menu_clone_kill(self, action, param) -> None:
         if self._clone is not None:

@@ -1,4 +1,4 @@
-.PHONY: run start stop debug install uninstall test-states help
+.PHONY: run start stop debug install uninstall test-states sprites help
 
 CLAUDE_CONFIG_DIRS ?= $(HOME)/.claude $(HOME)/.claude-work
 
@@ -33,6 +33,11 @@ install:
 uninstall:
 	bash uninstall.sh $(CLAUDE_CONFIG_DIRS)
 
+# Redraw the generated Deadpool sprites (scooter: shime54-56, finger gun: shime57-68)
+sprites:
+	python3 tools/draw_scooter.py sprites/deadpool/img
+	python3 tools/draw_finger_gun.py sprites/deadpool/img
+
 # Test: cycle through all states (useful for development)
 test-states:
 	@echo "Testing state transitions..."
@@ -57,5 +62,6 @@ help:
 	@echo "  make debug         Run with debug logging"
 	@echo "  make install       Install hooks (CLAUDE_CONFIG_DIRS=\"~/.claude ~/.claude-work\")"
 	@echo "  make uninstall     Remove hooks"
+	@echo "  make sprites       Redraw the generated Deadpool sprites"
 	@echo "  make test-states   Cycle through all states"
 	@echo "  make test-STATE    Set a specific state (e.g., make test-attention)"

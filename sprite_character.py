@@ -99,6 +99,16 @@ class SpriteCharacter:
                 "loops": 1,
                 "next": "idle",
             },
+            "finger_gun": {
+                "sprites": ([11] * 10 + [57] * 4 + [58] * 7 + [59, 60] + [61] * 6
+                            + [62, 63, 64, 64] + [65] * 6 + [66, 67] + [15] * 5
+                            + [68, 68, 15, 15, 68, 68] + [15] * 21),
+                "delay": 70,
+                "loop": False,
+                "loops": 1,
+                "next": "idle",
+                "fallback": "sit",
+            },
             "attack": {
                 "sprites": [27, 28, 29],
                 "delay": 200,
@@ -113,6 +123,11 @@ class SpriteCharacter:
             "walk": {
                 "sprites": [1, 2, 1, 3],
                 "delay": 120,
+            },
+            "scooter": {
+                "sprites": [54, 55, 56],
+                "delay": 90,
+                "fallback": "walk",
             },
             "sit": {
                 "sprites": [11],
@@ -181,10 +196,17 @@ class SpriteCharacter:
             fallback = min(self._sprites.keys())
             for configs in (self._state_config, self._move_config):
                 for cfg in configs.values():
+                    stand_in = cfg.get("fallback")
+                    if stand_in and not all(s in self._sprites for s in cfg["sprites"]):
+                        cfg["sprites"] = self._stand_in_sprites(stand_in, len(cfg["sprites"]))
                     cfg["sprites"] = [
                         s if s in self._sprites else fallback
                         for s in cfg["sprites"]
                     ]
+
+    def _stand_in_sprites(self, name: str, length: int) -> list[int]:
+        source = (self._state_config.get(name) or self._move_config[name])["sprites"]
+        return [source[i % len(source)] for i in range(max(length, len(source)))]
 
     # ------------------------------------------------------------------
     # State machine
