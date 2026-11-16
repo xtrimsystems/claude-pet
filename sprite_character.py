@@ -12,9 +12,14 @@ Conforms to the Character protocol expected by PetWindow.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 
 import cairo
+
+SPRITE_FILE = re.compile(r"shime(\d+)\.png")
+EXTRA_ANIMATIONS_FILE = "animations.json"
 
 
 class SpriteCharacter:
@@ -39,14 +44,14 @@ class SpriteCharacter:
         img_dir = os.path.join(mascot_path, "img")
         if not os.path.isdir(img_dir):
             img_dir = mascot_path
-        # Scan up to 200 to handle gaps in numbering
-        for i in range(1, 200):
-            path = os.path.join(img_dir, f"shime{i}.png")
-            if os.path.exists(path):
+        for name in os.listdir(img_dir):
+            match = SPRITE_FILE.fullmatch(name)
+            path = os.path.join(img_dir, name)
+            if match:
                 # Skip blank/transparent sprites (fully transparent PNGs are tiny)
                 if os.path.getsize(path) < 500:
                     continue
-                self._sprites[i] = cairo.ImageSurface.create_from_png(path)
+                self._sprites[int(match.group(1))] = cairo.ImageSurface.create_from_png(path)
 
         # State-override animations (triggered by Claude hooks or wander engine)
         # These freeze movement and take priority over move animations.
@@ -99,16 +104,6 @@ class SpriteCharacter:
                 "loops": 1,
                 "next": "idle",
             },
-            "finger_gun": {
-                "sprites": ([11] * 10 + [57] * 4 + [58] * 7 + [59, 60] + [61] * 6
-                            + [62, 63, 64, 64] + [65] * 6 + [66, 67] + [15] * 5
-                            + [68, 68, 15, 15, 68, 68] + [15] * 21),
-                "delay": 70,
-                "loop": False,
-                "loops": 1,
-                "next": "idle",
-                "fallback": "sit",
-            },
             "attack": {
                 "sprites": [27, 28, 29],
                 "delay": 200,
@@ -123,11 +118,6 @@ class SpriteCharacter:
             "walk": {
                 "sprites": [1, 2, 1, 3],
                 "delay": 120,
-            },
-            "scooter": {
-                "sprites": [54, 55, 56],
-                "delay": 90,
-                "fallback": "walk",
             },
             "sit": {
                 "sprites": [11],
@@ -191,22 +181,37 @@ class SpriteCharacter:
             },
         }
 
+        self._load_extra_animations(mascot_path)
+
         # Replace missing sprite indices with fallback (first available sprite)
         if self._sprites:
             fallback = min(self._sprites.keys())
             for configs in (self._state_config, self._move_config):
                 for cfg in configs.values():
-                    stand_in = cfg.get("fallback")
-                    if stand_in and not all(s in self._sprites for s in cfg["sprites"]):
-                        cfg["sprites"] = self._stand_in_sprites(stand_in, len(cfg["sprites"]))
                     cfg["sprites"] = [
                         s if s in self._sprites else fallback
                         for s in cfg["sprites"]
                     ]
 
-    def _stand_in_sprites(self, name: str, length: int) -> list[int]:
-        source = (self._state_config.get(name) or self._move_config[name])["sprites"]
-        return [source[i % len(source)] for i in range(max(length, len(source)))]
+    def _load_extra_animations(self, mascot_path: str) -> None:
+        path = os.path.join(mascot_path, EXTRA_ANIMATIONS_FILE)
+        if not os.path.isfile(path):
+            return
+        with open(path) as f:
+            extras = json.load(f)
+        self._state_config.update(extras.get("states", {}))
+        self._move_config.update(extras.get("moves", {}))
+
+    def supports(self, animation: str) -> bool:
+        return animation in self._state_config or animation in self._move_config
+
+    def animation_ms(self, state: str) -> int:
+        cfg = self._state_config[state]
+        return sum(cfg["durations"]) if "durations" in cfg else cfg["delay"] * len(cfg["sprites"])
+
+    def _frame_ms(self, cfg: dict) -> int:
+        durations = cfg.get("durations")
+        return durations[self.frame % len(durations)] if durations else cfg["delay"]
 
     # ------------------------------------------------------------------
     # State machine
@@ -242,8 +247,8 @@ class SpriteCharacter:
         n_frames = len(cfg["sprites"])
         self._tick_accum += self._TICK_MS
 
-        while self._tick_accum >= cfg["delay"]:
-            self._tick_accum -= cfg["delay"]
+        while self._tick_accum >= self._frame_ms(cfg):
+            self._tick_accum -= self._frame_ms(cfg)
             self.frame += 1
 
             if self.frame >= n_frames:
@@ -261,7 +266,7 @@ class SpriteCharacter:
                         break
 
     def get_frame_delay(self) -> int:
-        return self._active_config()["delay"]
+        return self._frame_ms(self._active_config())
 
     # ------------------------------------------------------------------
     # Drawing

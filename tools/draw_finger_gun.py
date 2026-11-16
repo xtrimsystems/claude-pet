@@ -1,10 +1,8 @@
 import math
 import os
-import sys
 
 import cairo
 
-FIRST_INDEX = 57
 SIZE = 128
 SITTING = 11
 GUN_POSE = 15
@@ -203,12 +201,13 @@ def build(img_dir):
 
 
 
-def main(img_dir):
-    for offset, (name, surface) in enumerate(build(img_dir).items()):
-        target = os.path.join(img_dir, f"shime{FIRST_INDEX + offset}.png")
-        surface.write_to_png(target)
-        print(target, name)
-
-
-if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "sprites/deadpool/img")
+def animations(kit):
+    steps = build(kit.img_dir)
+    timeline = [
+        (SITTING, 700), (steps["half_lids"], 280), (steps["smirk"], 490),
+        (steps["draw_low"], 70), (steps["draw_mid"], 70), (steps["aimed"], 420),
+        (steps["flag_peek"], 70), (steps["flag_half"], 70), (steps["flag_pop"], 140), (steps["flag"], 420),
+        (steps["bubble_small"], 70), (steps["bubble_big"], 70), (GUN_POSE, 350),
+        (steps["bubble_beat"], 140), (GUN_POSE, 140), (steps["bubble_beat"], 140), (GUN_POSE, 1470),
+    ]
+    return [("finger_gun", "states", timeline, {"loop": False, "loops": 1, "next": "idle"})]

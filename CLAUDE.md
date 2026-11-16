@@ -4,13 +4,18 @@ Shimeji-style desktop pet for Claude Code. A transparent, click-through overlay 
 
 ## Architecture
 
-4 Python files plus two sprite tools, no build system (runs directly with system python3):
+4 Python files for the pet plus the sprite generator in `tools/`, no build system (runs directly with system python3):
 
 - **main.py** - Entry point. Re-execs itself with `libgtk4-layer-shell` in `LD_PRELOAD` (the library must load before libwayland-client, which a language binding can't guarantee — this is the documented approach), parses args (`--size`, `--mascot`, `--monitor`, `--state-file`, `--pid-file`, `--debug`), loads config from `~/.config/claude-pet/config.json`, resolves the mascot, creates `SpriteCharacter` + `ClaudeBridge` + `Pet`, runs a GLib main loop. Single instance via `/tmp/claude-pet.pid` (the PID file is only removed by the process that owns it).
 - **pet_window.py** - The core. `MonitorOverlay` (one full-output layer-shell surface per monitor, `overlay` layer, transparent, input region limited to the sprite), `SpriteArea` (a small `Gtk.DrawingArea` moved inside a `Gtk.Fixed`), `WanderEngine` (movement AI) and `Pet` (the controller: 60fps GLib timer, drag/throw gestures, right-click `Gtk.PopoverMenu`, clone-kill animation, bridge integration). Positions are global desktop coordinates; each overlay shows the sprite only if it touches its monitor, so dragging across monitors just works.
-- **sprite_character.py** - Loads shime*.png sprites from mascot directories. Defines two animation config dicts: `_state_config` (Claude states) and `_move_config` (movement animations). Handles frame advancement, looping, and state transitions.
-- **tools/draw_scooter.py** - Draws the scooter sprites (shime54-56) with cairo: the sitting pose (shime11) lifted onto a mint scooter, plus an arm on the handlebar, in the pack's flat style (black ~2.5px outlines, suit red `#6C0000`). Run with `make sprites`; it overwrites those three PNGs.
-- **tools/draw_finger_gun.py** - Builds the finger-gun frames (shime57-68) only from the pack's own pixels: shime11 (sitting) and shime15 (gun + heart, identical to shime26). Lowers the eyelids, pastes 15's smirk eyes onto 11 (15's head sits 2px left / 1px lower), rotates 15's gun arm up from the hip, slides the flag out of the barrel, pops and beats the heart bubble. Also run by `make sprites`.
+- **sprite_character.py** - Loads every `shime<N>.png` in the mascot folder. Defines two animation config dicts: `_state_config` (Claude states) and `_move_config` (movement animations), then merges the mascot's optional `animations.json` over them. Handles frame advancement (fixed `delay` or per-frame `durations`), looping, and state transitions. `supports(name)` tells the pet which extra animations a mascot has.
+- **tools/** - The Deadpool sprite generator, run with `make sprites` (cairo only, system python3):
+  - `build_sprites.py` - entry point. Collects every generated animation, numbers new frames from shime54 up (frames identical to an original sprite reuse its index; identical frames are shared), writes the PNGs, deletes stale generated ones, and writes `sprites/deadpool/animations.json`. Fails if a frame would be under 500 bytes (the loader skips those as blank).
+  - `sprite_kit.py` - shared helpers: eye detection (`eye_blobs`), eyelids (`close_eyes`), moving pupils (`move_eyes`), crisp lean (`shear`), outlined shapes (`silhouette`, `filled`), smoke `cloud`, `zzz`, `nose_bubble`, stars, sparkles, the red `exclamation` (same red as the pack's "?").
+  - `draw_scooter.py` - the sitting pose (shime11) on a mint scooter with an arm on the handlebar.
+  - `draw_finger_gun.py` - finger gun from the pack's own pixels: shime11 + shime15 (identical to shime26; 15's head sits 2px left / 1px lower). Lids close, gun arm rotates up from the hip, flag slides out of the barrel, heart bubble pops and beats.
+  - `draw_extras.py` - nap, laptop doze, fly gag, vibing (grey headphones, `shear` sway), unicorn (rider is shime5 with the back foot erased and the front leg pasted back over the unicorn), head pop, teleport.
+  - Style rule: Deadpool himself is only ever built from the pack's pixels (cut, shift, rotate, recolor); code draws props and effects only, in the pack's flat style (black ~2.5px outlines, suit red `#6C0000`).
 - **claude_bridge.py** - Polls the state file (`/tmp/claude-pet-state`) every 300ms for state changes. Has a 60-second idle timeout that auto-transitions to idle if no state change occurs. Valid states: idle, thinking, working, attention, celebrating, doubling.
 
 ## Animation System (sprite_character.py)
@@ -25,12 +30,15 @@ Shimeji-style desktop pet for Claude Code. A transparent, click-through overlay 
 {
     "sprites": [47, 48, 48, 48, 47],  # shime indices to play
     "delay": 600,                       # ms per frame
+    "durations": [600, 300, ...],       # optional instead of "delay": ms for each frame (used by animations.json)
     "loop": True,                       # default True; False = finite plays
     "loops": 2,                         # only for loop:False; default 2; how many times to play
     "next": "idle",                     # only for loop:False; state to transition to after done
-    "fallback": "walk",                 # optional; if any of our sprites is missing, play this config's sprites instead (either dict), repeated to keep the length
 }
 ```
+
+### Extra animations (`<mascot>/animations.json`):
+`{"states": {name: config}, "moves": {name: config}}`, merged over the built-in dicts. Generated for Deadpool by `make sprites`; never edit it by hand. A mascot without the file (Jake, Naruto) simply has none of the extras: they are left out of the random pool and the menu.
 
 ### Loop behavior:
 - **`"loop": True`** (default if omitted) - loops **forever** until state changes externally. Used for ongoing states: idle, thinking, working, attention.
@@ -43,7 +51,7 @@ Shimeji-style desktop pet for Claude Code. A transparent, click-through overlay 
 3. If Claude state IS "idle" AND no movement -> plays static `_state_config["idle"]`
 
 ### Movement freezing:
-When Claude state is working, thinking, error, attention, doubling, clone_frozen, stumble, attack, or finger_gun, the `WanderEngine.tick()` returns current position without moving. The pet stays put while these animations play.
+In any state other than idle, `WanderEngine.tick()` returns the current position without moving. The pet stays put while these animations play.
 
 ## State Triggering - Three Sources
 
@@ -67,19 +75,25 @@ Note: PostToolUse and PostToolUseFailure are intentionally not hooked — they f
 - Bridge respects `_manual_override` flag - won't change state while user is controlling via menu.
 
 ### 2. Right-click context menu (pet_window.py `_on_menu_set_state`, a `Gtk.PopoverMenu` over `Gio.Menu` + `Gio.SimpleActionGroup` "pet")
+- Items: Kick, Jump, Scooter/Unicorn (`pet.ride`), Teleport, Clone & Kill, and a "Tricks" submenu (finger gun, fly, vibing, head pop, nap, laptop doze) that goes through `pet.state`. Extras only appear when the mascot `supports()` them.
+- The menu always works, whatever is playing. Moves (kick, jump, rides) go through `_start_menu_move`: it drops the current state to idle (cutting a nap, a trick or a Claude state), sets `_manual_override`, and lets the wander engine run even when Wander is off. `_finish_menu_move` ends it once he sits again: override cleared, then `_resume_claude_state()` (the bridge's current thinking/working/attention, else idle).
 - Sets `_manual_override = True` so bridge won't interfere.
 - For **looping** states (loop:True): sets a GLib timer for 3 full cycles, then returns to idle and clears override.
 - For **non-looping** states (loop:False): the animation plays its `"loops"` count and auto-transitions via `tick()`. Override is cleared in `_on_frame_tick` when it detects the state changed and `is_busy` is False.
 
 ### 3. Wander engine random behaviors (pet_window.py `WanderEngine._pick_behavior`)
 - During idle, the wander engine randomly picks behaviors using weighted probabilities.
-- Besides movement (sit, walk, climb, kick, jump, scooter), it can also pick: **clone_kill, error, finger_gun**.
+- Besides movement (sit, walk, climb, kick, jump, scooter, unicorn), it can also pick state tricks: **clone_kill, error, finger_gun, fly_gag, vibing, head_pop, teleport** (`STATE_BEHAVIORS` maps teleport to `teleport_out`).
 - These are set as `pending_anim` on the wander engine, then picked up by `_on_frame_tick` and applied via `set_state()`.
+- Optional behaviors (`OPTIONAL_BEHAVIORS`) are only picked when the mascot supports them: `Pet._sync_extras()` fills `WanderEngine.extras` at start and on mascot switch.
 - Weights differ between calm mode (default) and active mode (--debug flag):
-  - Calm: sit=120, walk=80, climb=20, kick=10, jump=4, scooter=6, finger_gun=4, clone_kill=3, error=3
-  - Active: sit=50, walk=150, climb=40, kick=18, jump=7, scooter=12, finger_gun=6, clone_kill=5, error=5
-- **Scooter** (`Move.SCOOTER`, also "Scooter!" in the menu): rides along the ground toward the farther screen edge, speeding up from 1 to 4.5 px/frame and braking near the edge, then turns around and sits. Mascots without sprites 54-56 use the walk frames instead (`"fallback": "walk"`).
-- **Finger gun** (`finger_gun` state, also "Finger gun!" in the menu, which goes through `pet.state`): a one-shot ~5s sitting animation at 70ms per frame (frames repeated for timing): eyes close into a smirk, gun drawn from the hip, flag pops out, heart bubble pops in and beats, then idle. Mascots missing any of its sprites just sit for that time (`"fallback": "sit"`).
+  - Calm: sit=120, walk=80, climb=20, kick=10, jump=4, scooter=6, unicorn=4, teleport=4, finger_gun=4, fly_gag=3, vibing=4, head_pop=3, clone_kill=3, error=3
+  - Active: sit=50, walk=150, climb=40, kick=18, jump=7, scooter=12, unicorn=8, teleport=8, finger_gun=6, fly_gag=5, vibing=6, head_pop=5, clone_kill=5, error=5
+- **Rides** (`Move.SCOOTER`, `Move.UNICORN`; `_start_ride`/`_do_ride`): ride along the ground toward the farther screen edge, speeding up from 1 to 4.5 px/frame (`RIDE_*`) and braking near the edge, then turn around and sit.
+- **Teleport**: `teleport_out` (belt sparks, smoke, vanish) -> `Pet._on_animation_finished` calls `WanderEngine.teleport()` (a random ground spot at least a quarter of the monitor away) -> `teleport_in` (smoke clears, he's there) -> idle.
+- **One-shot tricks** (~3-10s each, then idle): finger_gun (eyes close, gun from the hip, flag, heart), fly_gag (eyes follow a fly, he aims, the flag pops, the fly lands on his head), vibing (headphones, sway, plays its cycle 3 times), head_pop (head pops off, spins, lands, dizzy stars).
+- **Nap** (not in the random pool): `Pet._maybe_fall_asleep` starts `nap_start` -> `napping` (loop) after `NAP_AFTER_IDLE_S` (5 min) without activity while he sits on the ground. He also wakes by himself after `NAP_LENGTH_S` (1-3 min, `_maybe_wake_up`). Any non-idle bridge state, or grabbing him, plays `nap_wake` first; the bridge state is kept in `_after_nap` and applied when the wake-up ends. Idle writes are ignored while napping. Every wake-up restarts the 5 min countdown to the next nap.
+- **Laptop doze** (not in the random pool): `Pet._maybe_doze` swaps `working` for `laptop_doze` after `DOZE_AFTER_WORKING_S` (90s) of continuous working, on average after another `DOZE_MEAN_WAIT_S` (2 min), at most once per `DOZE_COOLDOWN_S` (5 min). The bridge's repeated "working" writes are ignored during it; when it ends the pet takes the bridge's current state (`_resume_claude_state`).
 - **Stumble**: Random chance per frame while walking on the ground. Base ~0.03% per frame (~2%/s), boosted to ~0.3% per frame (~16%/s) when another pet is very close (within half a sprite width). Interrupts the walk mid-stride with the stumble animation [19, 18, 20], then returns to idle.
 
 ## Sprite Mapping (Deadpool mascot, current)
@@ -105,9 +119,8 @@ Note: PostToolUse and PostToolUseFailure are intentionally not hooked — they f
 | 27-29 | Attack animation (used in clone-kill) |
 | 49-50 | Celebrating animation |
 | 51-53 | Attention (HEY! neon sign) |
-| 54-56 | Scooter ride (generated by `tools/draw_scooter.py`) |
 | 15 (=26) | Finger gun + heart bubble (last frame of finger_gun) |
-| 57-68 | Finger gun steps (generated by `tools/draw_finger_gun.py`): half lids, smirk, draw low, draw mid, aimed, flag peek, flag half, flag pop, flag, bubble small, bubble big, heart beat |
+| 54+ | Generated by `make sprites` (scooter, finger gun, nap, laptop doze, fly, vibing, unicorn, head pop, teleport). Which frames each animation plays, and for how long, is in `sprites/deadpool/animations.json`. |
 
 ## Clone-Kill Animation Sequence
 
@@ -122,13 +135,14 @@ Note: PostToolUse and PostToolUseFailure are intentionally not hooked — they f
 - **Layer-shell overlays** - one `Gtk.Window` per monitor, anchored to all four edges with exclusive zone -1 (covers the whole output, including bar areas), layer `overlay` (above fullscreen windows), keyboard mode `none`, namespace `claude-pet` (visible in `hyprctl layers`). Transparent via CSS `window.claude-pet { background-color: transparent; }`. `Gdk.Surface.set_input_region` is updated whenever a sprite moves so only the sprite rectangles take clicks.
 - **Leaving a monitor** - a sprite that leaves an overlay is not hidden but painted transparent in place (`SpriteArea.active = False`): with nothing left to draw GTK skips the frame and the compositor keeps showing the old buffer, i.e. a ghost.
 - **Drawing cost** - only the 128x128 `SpriteArea` nodes are redrawn (`queue_draw` on the sprite, not the window), and only when position, frame or state changed; the timer itself runs at 60fps. Idle CPU ~1%.
+- **Menu position** - the popover points at the click via `_gdk_rect()`: PyGObject ignores `Gdk.Rectangle(x, y, w, h)` arguments, which put the menu in the top-left corner.
 - **Gestures** - `Gtk.GestureDrag` (button 1) for drag/throw with the implicit grab, so the drag keeps tracking when the pointer leaves the sprite or the monitor; `Gtk.GestureClick` (button 3) for the menu.
 - **Monitor hotplug** - `Gdk.Display.get_monitors()` "items-changed" rebuilds the overlays and the wander bounds.
 - **60fps frame timer** - `FRAME_INTERVAL_MS = 1000 // 60 = 16ms`. Character `_TICK_MS` matches this.
-- **Sprite fallback** - if a sprite index is missing, falls back to the lowest available sprite number (line 167-175 of sprite_character.py). This means animations work even if a mascot is missing some sprites.
+- **Sprite fallback** - if a sprite index is missing, falls back to the lowest available sprite number (end of `SpriteCharacter.__init__`). This means animations work even if a mascot is missing some sprites.
 - **Multi-monitor** - WanderEngine tracks the active monitor (global coordinates), switches on drag-drop. Pet is constrained to one monitor at a time.
 - **Config persistence** - mascot selection saved to `~/.config/claude-pet/config.json`; an optional `"monitor": "DP-6"` there pins the spawn monitor.
-- **Sprites skip tiny files** - PNGs under 500 bytes are skipped (assumed blank/transparent).
+- **Sprites skip tiny files** - PNGs under 500 bytes are skipped (assumed blank/transparent). Any `shime<N>.png` is loaded, there is no upper index limit.
 
 ## Running
 
@@ -138,7 +152,7 @@ make debug        # with debug logging (activates "active" wander mode)
 make start        # background
 make stop         # kill the pet
 make test-states  # cycle through all states
-make sprites      # redraw the generated sprites (scooter, finger gun)
+make sprites      # regenerate shime54+ and animations.json (tools/build_sprites.py)
 make test-working # set a specific state
 make install      # install hooks (into ~/.claude and ~/.claude-work)
 make uninstall    # remove hooks

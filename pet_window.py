@@ -14,6 +14,7 @@ import enum
 import logging
 import os
 import random
+import time
 from typing import Protocol
 
 import cairo
@@ -39,6 +40,8 @@ class CharacterProto(Protocol):
     def tick(self) -> None: ...
     def set_state(self, state: str) -> None: ...
     def set_movement(self, move: str, facing: int) -> None: ...
+    def supports(self, animation: str) -> bool: ...
+    def animation_ms(self, state: str) -> int: ...
 
 
 class ClaudeBridgeProto(Protocol):
@@ -51,8 +54,24 @@ FRAME_INTERVAL_MS = 1000 // 60
 TEST_STATES = ("idle", "thinking", "working", "attention", "celebrating")
 SPRITE_BASE = 128  # Shimeji sprites are 128x128
 SCALE_OPTIONS = (0.5, 1.0, 1.5, 2.0)
+NAP_AFTER_IDLE_S = 300
+NAP_LENGTH_S = (60, 180)
+ONGOING_CLAUDE_STATES = ("thinking", "working", "attention")
+NAP_STATES = ("nap_start", "napping", "nap_wake")
+DOZE_AFTER_WORKING_S = 90
+DOZE_MEAN_WAIT_S = 120
+DOZE_COOLDOWN_S = 300
+TRICKS = (("Finger gun", "finger_gun"), ("The fly", "fly_gag"), ("Vibing", "vibing"),
+          ("Head pop", "head_pop"), ("Nap", "nap_start"), ("Dozing at the laptop", "laptop_doze"))
 
 TRANSPARENT_CSS = b"window.claude-pet { background-color: transparent; }"
+
+
+def _gdk_rect(x: int, y: int, width: int, height: int) -> Gdk.Rectangle:
+    # PyGObject ignores Gdk.Rectangle(x, y, w, h) arguments (all zeros), so set the fields.
+    rect = Gdk.Rectangle()
+    rect.x, rect.y, rect.width, rect.height = x, y, width, height
+    return rect
 
 
 # ======================================================================
@@ -73,6 +92,13 @@ class Move(enum.Enum):
     HARD_LAND = "hard_land"
     SIT = "sit"
     SCOOTER = "scooter"
+    UNICORN = "unicorn"
+
+
+RIDES = {"scooter": Move.SCOOTER, "unicorn": Move.UNICORN}
+STATE_BEHAVIORS = {"clone_kill": "clone_kill", "error": "error", "finger_gun": "finger_gun",
+                   "fly_gag": "fly_gag", "vibing": "vibing", "head_pop": "head_pop", "teleport": "teleport_out"}
+OPTIONAL_BEHAVIORS = {"scooter", "unicorn", "teleport", "finger_gun", "fly_gag", "vibing", "head_pop"}
 
 
 class WanderEngine:
@@ -100,17 +126,20 @@ class WanderEngine:
     JUMP_VX_SMALL = 1.5            # horizontal push for small jumps
     JUMP_VX_BIG = 7.0              # horizontal push for big jumps (wider arc)
     JUMP_GRAVITY = 0.12            # gravity during jump
-    SCOOTER_SPEED_START = 1.0      # px/frame when setting off
-    SCOOTER_SPEED_MAX = 4.5        # px/frame cruising (~270 px/sec)
-    SCOOTER_ACCEL = 0.06           # px/frame² until cruising speed
-    SCOOTER_BRAKE = 0.05           # speed cap per px left to the edge
+    RIDE_SPEED_START = 1.0         # px/frame when setting off
+    RIDE_SPEED_MAX = 4.5           # px/frame cruising (~270 px/sec)
+    RIDE_ACCEL = 0.06              # px/frame² until cruising speed
+    RIDE_BRAKE = 0.05              # speed cap per px left to the edge
 
     # Behavior weights (higher = more likely to be chosen)
     #   sit:   stay put          walk:  walk on ground
     #   climb: climb nearest edge
-    #   scooter: ride across the screen to the far edge
-    CALM_WEIGHTS   = {"sit": 120, "walk": 80, "climb": 20, "kick": 10, "jump": 4, "scooter": 6, "finger_gun": 4, "clone_kill": 3, "error": 3}
-    ACTIVE_WEIGHTS = {"sit":  50, "walk": 150, "climb": 40, "kick": 18, "jump": 7, "scooter": 12, "finger_gun": 6, "clone_kill": 5, "error": 5}
+    #   scooter / unicorn: ride across the screen to the far edge
+    #   teleport: vanish in smoke, reappear elsewhere on the ground
+    CALM_WEIGHTS   = {"sit": 120, "walk": 80, "climb": 20, "kick": 10, "jump": 4, "scooter": 6, "unicorn": 4, "teleport": 4,
+                      "finger_gun": 4, "fly_gag": 3, "vibing": 4, "head_pop": 3, "clone_kill": 3, "error": 3}
+    ACTIVE_WEIGHTS = {"sit":  50, "walk": 150, "climb": 40, "kick": 18, "jump": 7, "scooter": 12, "unicorn": 8, "teleport": 8,
+                      "finger_gun": 6, "fly_gag": 5, "vibing": 6, "head_pop": 5, "clone_kill": 5, "error": 5}
     STUMBLE_CHANCE = 0.0003      # per frame while walking (~2% per second)
 
     # Sit durations (frames at 60 fps)
@@ -151,7 +180,8 @@ class WanderEngine:
         self._jump_vx = 0.0
         self._jump_vy = 0.0
         self._jump_peak_y = 0.0
-        self._scooter_speed = 0.0
+        self._ride_speed = 0.0
+        self.extras: set[str] = set()
         self.pending_anim: str | None = None
 
     # --- active monitor ---
@@ -181,7 +211,9 @@ class WanderEngine:
     # --- behavior selection (Shimeji-style weighted random) ---
 
     def _pick_behavior(self) -> Move:
-        weights = dict(self.ACTIVE_WEIGHTS if self.active_mode else self.CALM_WEIGHTS)
+        weights = {behavior: weight
+                   for behavior, weight in (self.ACTIVE_WEIGHTS if self.active_mode else self.CALM_WEIGHTS).items()
+                   if behavior not in OPTIONAL_BEHAVIORS or behavior in self.extras}
         total = sum(weights.values())
         roll = random.random() * total
         cumulative = 0.0
@@ -203,9 +235,9 @@ class WanderEngine:
                     return Move.KICK
                 elif behavior == "jump":
                     return Move.JUMP
-                elif behavior == "scooter":
-                    return Move.SCOOTER
-                elif behavior in ("clone_kill", "error", "finger_gun"):
+                elif behavior in RIDES:
+                    return RIDES[behavior]
+                elif behavior in STATE_BEHAVIORS:
                     return behavior
         return Move.SIT
 
@@ -218,9 +250,7 @@ class WanderEngine:
     # --- tick ---
 
     def tick(self, anim_state: str) -> tuple[int, int]:
-        if anim_state in ("working", "thinking", "error", "attention",
-                          "doubling", "clone_frozen", "stumble",
-                          "celebrating", "attack", "finger_gun"):
+        if anim_state != "idle":
             return int(self.x), int(self.y)
 
         if self.move_state == Move.WALK_GROUND:
@@ -247,8 +277,8 @@ class WanderEngine:
             self._do_hard_land()
         elif self.move_state == Move.SIT:
             self._do_sit()
-        elif self.move_state == Move.SCOOTER:
-            self._do_scooter()
+        elif self.move_state in (Move.SCOOTER, Move.UNICORN):
+            self._do_ride()
 
         self.x = max(self.x_min, min(self.x, self.x_max))
         self.y = max(self.y_min, min(self.y, self.y_max))
@@ -363,8 +393,8 @@ class WanderEngine:
     def _transition(self) -> None:
         """Pick the next behavior using weighted random selection."""
         nxt = self._pick_behavior()
-        if nxt in ("clone_kill", "error", "finger_gun"):
-            self.pending_anim = nxt
+        if nxt in STATE_BEHAVIORS:
+            self.pending_anim = STATE_BEHAVIORS[nxt]
             self._start_sit()
         elif nxt == Move.SIT:
             self._start_sit()
@@ -376,8 +406,8 @@ class WanderEngine:
             self._start_kick()
         elif nxt == Move.JUMP:
             self._start_jump()
-        elif nxt == Move.SCOOTER:
-            self._start_scooter()
+        elif nxt in (Move.SCOOTER, Move.UNICORN):
+            self._start_ride(nxt)
         else:
             self._start_walk()
 
@@ -393,24 +423,31 @@ class WanderEngine:
         lo, hi = self._walk_range()
         self._walk_timer = random.randint(lo, hi)
 
-    def _start_scooter(self) -> None:
-        self.move_state = Move.SCOOTER
+    def _start_ride(self, ride: Move) -> None:
+        self.move_state = ride
         room_left = self.x - self.x_min
         room_right = self.x_max - self.x
         self.direction = 1 if room_right > room_left else -1
-        self._scooter_speed = self.SCOOTER_SPEED_START
+        self._ride_speed = self.RIDE_SPEED_START
 
-    def _do_scooter(self) -> None:
+    def _do_ride(self) -> None:
         self.y = self.y_max
         distance_to_edge = (self.x_max - self.x) if self.direction > 0 else (self.x - self.x_min)
-        self._scooter_speed = min(self._scooter_speed + self.SCOOTER_ACCEL,
-                                  self.SCOOTER_SPEED_MAX,
-                                  self.SCOOTER_SPEED_START + distance_to_edge * self.SCOOTER_BRAKE)
-        self.x += self._scooter_speed * self.direction
+        self._ride_speed = min(self._ride_speed + self.RIDE_ACCEL,
+                               self.RIDE_SPEED_MAX,
+                               self.RIDE_SPEED_START + distance_to_edge * self.RIDE_BRAKE)
+        self.x += self._ride_speed * self.direction
         if self.x_min < self.x < self.x_max:
             return
         self.x = max(self.x_min, min(self.x, self.x_max))
         self.direction = -self.direction
+        self._start_sit()
+
+    def teleport(self) -> None:
+        span = self.x_max - self.x_min
+        self.x = self.x_min + (self.x - self.x_min + random.uniform(span / 4, span * 3 / 4)) % span
+        self.y = self.y_max
+        self.direction = random.choice([-1, 1])
         self._start_sit()
 
     def _start_kick(self) -> None:
@@ -724,6 +761,13 @@ class Pet:
         self._clone: dict | None = None
         self._clone_timer_id: int | None = None
 
+        self._last_activity = time.monotonic()
+        self._after_nap: str | None = None
+        self._nap_ends_at: float | None = None
+        self._menu_move = False
+        self._working_since: float | None = None
+        self._last_doze = -DOZE_COOLDOWN_S
+
         self._overlays: list[MonitorOverlay] = []
         self._display = Gdk.Display.get_default()
         self._install_css()
@@ -793,11 +837,17 @@ class Pet:
             self._wander.x = float(random.randint(gx + margin, gx + gw - self._size - margin))
         # Snap to ground so we don't start floating
         self._wander.y = self._wander.y_max
+        self._sync_extras()
         logger.debug("Bounds: x=[%.0f, %.0f] y=[%.0f, %.0f], mode: %s",
                      self._wander.x_min, self._wander.x_max,
                      self._wander.y_min, self._wander.y_max,
                      "active" if self._debug else "calm")
         self._render()
+
+    def _sync_extras(self) -> None:
+        if self._wander is not None:
+            self._wander.extras = {behavior for behavior in OPTIONAL_BEHAVIORS
+                                   if self.character.supports(STATE_BEHAVIORS.get(behavior, behavior))}
 
     # ------------------------------------------------------------------
     # Timers
@@ -810,6 +860,66 @@ class Pet:
         if self._frame_timer_id is not None:
             GLib.source_remove(self._frame_timer_id)
             self._frame_timer_id = None
+
+    def _on_animation_finished(self, finished: str) -> None:
+        if finished == "teleport_out" and self._wander is not None:
+            self._wander.teleport()
+            self._draw_offset_x = self._draw_offset_y = 0
+            self._render()
+        elif finished == "nap_wake":
+            self._last_activity = time.monotonic()
+            if self._after_nap:
+                self.character.set_state(self._after_nap)
+                self._after_nap = None
+        elif finished == "laptop_doze":
+            self._resume_claude_state()
+
+    def _resume_claude_state(self) -> None:
+        claude_state = self.bridge.get_state()
+        self.character.set_state(claude_state if claude_state in ONGOING_CLAUDE_STATES else "idle")
+
+    def _track_activity(self) -> None:
+        if self.character.state != "idle" and self.character.state not in NAP_STATES:
+            self._last_activity = time.monotonic()
+
+    def _maybe_fall_asleep(self) -> None:
+        if (self.character.state == "idle"
+                and not self._drag_active
+                and self._wander is not None
+                and self._wander.move_state == Move.SIT
+                and self.character.supports("nap_start")
+                and time.monotonic() - self._last_activity > NAP_AFTER_IDLE_S):
+            self.character.set_state("nap_start")
+
+    def _maybe_wake_up(self) -> None:
+        if self.character.state != "napping":
+            self._nap_ends_at = None
+            return
+        now = time.monotonic()
+        if self._nap_ends_at is None:
+            self._nap_ends_at = now + random.uniform(*NAP_LENGTH_S)
+        elif now >= self._nap_ends_at:
+            self.character.set_state("nap_wake")
+
+    def _finish_menu_move(self) -> None:
+        if self._menu_move and self._wander is not None and self._wander.move_state == Move.SIT:
+            self._menu_move = False
+            self._manual_override = False
+            self._resume_claude_state()
+
+    def _maybe_doze(self) -> None:
+        now = time.monotonic()
+        if self.character.state != "working":
+            self._working_since = None
+            return
+        if self._working_since is None:
+            self._working_since = now
+        if (now - self._working_since > DOZE_AFTER_WORKING_S
+                and now - self._last_doze > DOZE_COOLDOWN_S
+                and self.character.supports("laptop_doze")
+                and random.random() < FRAME_INTERVAL_MS / 1000 / DOZE_MEAN_WAIT_S):
+            self._last_doze = now
+            self.character.set_state("laptop_doze")
 
     def _visual_key(self) -> tuple:
         c = self.character
@@ -833,6 +943,13 @@ class Pet:
                 and self._clone is None):
             self._spawn_clone()
 
+        if prev_state != self.character.state:
+            self._on_animation_finished(prev_state)
+        self._track_activity()
+        self._maybe_fall_asleep()
+        self._maybe_wake_up()
+        self._maybe_doze()
+
         # Update pendulum swing during drag (keeps swinging when mouse stops)
         if self._drag_active:
             spring = -self._drag_swing * 0.05
@@ -843,7 +960,7 @@ class Pet:
 
         moved = False
         # Move unless dragging, wander disabled, or character is busy
-        if (self._wander_enabled
+        if ((self._wander_enabled or self._menu_move)
                 and not self._drag_active
                 and self._clone is None
                 and not self.character.is_busy
@@ -851,6 +968,7 @@ class Pet:
             old = (int(self._wander.x), int(self._wander.y))
             new = self._wander.tick(self.character.state)
             moved = new != old
+            self._finish_menu_move()
 
             # Check if wander wants to trigger a character animation
             # Only apply during idle — don't override bridge states like attention
@@ -895,6 +1013,7 @@ class Pet:
                 Move.KICK: "kick",
                 Move.JUMP: "jump_launch",
                 Move.SCOOTER: "scooter",
+                Move.UNICORN: "unicorn",
             }
             move_name = move_map.get(self._wander.move_state, "")
             # Climb sprites face left; face toward the wall
@@ -983,6 +1102,13 @@ class Pet:
     def _apply_bridge_state(self, new_state: str) -> bool:
         if self._manual_override:
             return False
+        if self.character.state in NAP_STATES:
+            if new_state and new_state != "idle":
+                self._after_nap = new_state
+                self.character.set_state("nap_wake")
+            return False
+        if self.character.state == "laptop_doze" and new_state == "working":
+            return False
         if new_state and new_state != self.character.state:
             logger.debug("Bridge callback: %s -> %s", self.character.state, new_state)
             # "doubling" triggers clone-kill — lock out bridge until animation finishes
@@ -1023,6 +1149,9 @@ class Pet:
         self._draw_offset_x = 0
         self._draw_offset_y = 0
         self.character.set_movement("drag", -1)
+        self._last_activity = time.monotonic()
+        if self.character.state in ("nap_start", "napping"):
+            self.character.set_state("nap_wake")
 
     def _on_drag_update(self, gesture, offset_x: float, offset_y: float, overlay: MonitorOverlay) -> None:
         if not self._drag_active:
@@ -1111,15 +1240,15 @@ class Pet:
         group.add_action(mascot)
 
         for name, handler in (("kick", self._on_menu_kick), ("jump", self._on_menu_jump),
-                              ("scooter", self._on_menu_scooter),
                               ("clone-kill", self._on_menu_clone_kill), ("quit", self._on_menu_quit)):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", handler)
             group.add_action(action)
 
-        state = Gio.SimpleAction.new("state", GLib.VariantType.new("s"))
-        state.connect("activate", self._on_menu_set_state)
-        group.add_action(state)
+        for name, handler in (("state", self._on_menu_set_state), ("ride", self._on_menu_ride)):
+            action = Gio.SimpleAction.new(name, GLib.VariantType.new("s"))
+            action.connect("activate", handler)
+            group.add_action(action)
         return group
 
     def _build_menu_model(self) -> Gio.Menu:
@@ -1145,13 +1274,20 @@ class Pet:
         menu.append_section(None, section)
 
         section = Gio.Menu()
-        section.append("Kick!", "pet.kick")
-        section.append("Jump!", "pet.jump")
-        section.append("Scooter!", "pet.scooter")
-        finger_gun = Gio.MenuItem.new("Finger gun!", None)
-        finger_gun.set_action_and_target_value("pet.state", GLib.Variant.new_string("finger_gun"))
-        section.append_item(finger_gun)
-        section.append("Clone & Kill!", "pet.clone-kill")
+        section.append("Kick", "pet.kick")
+        section.append("Jump", "pet.jump")
+        for label, ride in (("Scooter", "scooter"), ("Unicorn", "unicorn")):
+            if self.character.supports(ride):
+                section.append_item(self._menu_item(label, "pet.ride", ride))
+        if self.character.supports("teleport_out"):
+            section.append_item(self._menu_item("Teleport", "pet.state", "teleport_out"))
+        section.append("Clone & Kill", "pet.clone-kill")
+        tricks = Gio.Menu()
+        for label, state in TRICKS:
+            if self.character.supports(state):
+                tricks.append_item(self._menu_item(label, "pet.state", state))
+        if tricks.get_n_items():
+            section.append_submenu("Tricks", tricks)
         menu.append_section(None, section)
 
         section = Gio.Menu()
@@ -1166,12 +1302,18 @@ class Pet:
         menu.append_section(None, section)
         return menu
 
+    @staticmethod
+    def _menu_item(label: str, action: str, target: str) -> Gio.MenuItem:
+        item = Gio.MenuItem.new(label, None)
+        item.set_action_and_target_value(action, GLib.Variant.new_string(target))
+        return item
+
     def _show_context_menu(self, overlay: MonitorOverlay, x: float, y: float) -> None:
         self._actions.lookup_action("auto").set_state(GLib.Variant.new_boolean(not self._manual_override))
         popover = Gtk.PopoverMenu.new_from_model(self._build_menu_model())
         popover.set_parent(overlay.canvas)
         popover.set_has_arrow(False)
-        popover.set_pointing_to(Gdk.Rectangle(int(x), int(y), 1, 1))
+        popover.set_pointing_to(_gdk_rect(int(x), int(y), 1, 1))
         popover.connect("closed", lambda p: GLib.idle_add(p.unparent))
         popover.popup()
 
@@ -1180,17 +1322,25 @@ class Pet:
             self.character.set_state("idle")
         return False
 
+    def _start_menu_move(self, start) -> None:
+        if self._wander is None:
+            return
+        self._cancel_menu_timeout()
+        self._after_nap = None
+        self._manual_override = True
+        self._menu_move = True
+        self.character.set_state("idle")
+        start()
+
     def _on_menu_kick(self, action, param) -> None:
-        if self._wander is not None:
-            self._wander._start_kick()
+        self._start_menu_move(lambda: self._wander._start_kick())
 
     def _on_menu_jump(self, action, param) -> None:
-        if self._wander is not None:
-            self._wander._start_jump()
+        self._start_menu_move(lambda: self._wander._start_jump())
 
-    def _on_menu_scooter(self, action, param) -> None:
-        if self._wander is not None:
-            self._wander._start_scooter()
+    def _on_menu_ride(self, action, value) -> None:
+        ride = RIDES[value.get_string()]
+        self._start_menu_move(lambda: self._wander._start_ride(ride))
 
     def _on_menu_clone_kill(self, action, param) -> None:
         if self._clone is not None:
@@ -1292,6 +1442,7 @@ class Pet:
         action.set_state(value)
         self._mascot_path = path
         self.character = new_char
+        self._sync_extras()
         self._render()
         logger.info("Switched mascot to %s (%d sprites)", path, len(new_char._sprites))
         # Persist selection as default
@@ -1306,19 +1457,21 @@ class Pet:
     def _on_menu_set_state(self, action, value) -> None:
         state = value.get_string()
         self._manual_override = True
+        self._menu_move = False
+        self._after_nap = None
         self.character.set_state(state)
-
-        # Cancel any pending menu timeout
-        if self._menu_timeout_id is not None:
-            GLib.source_remove(self._menu_timeout_id)
-            self._menu_timeout_id = None
+        self._cancel_menu_timeout()
 
         # Looping states get an auto-return to idle after ~3 loops
         cfg = self.character._state_config.get(state, {})
         if cfg.get("loop", True):
-            n_frames = cfg.get("frames") or len(cfg.get("sprites", [1]))
-            duration_ms = cfg["delay"] * n_frames * 3
+            duration_ms = self.character.animation_ms(state) * 3
             self._menu_timeout_id = GLib.timeout_add(duration_ms, self._on_menu_timeout)
+
+    def _cancel_menu_timeout(self) -> None:
+        if self._menu_timeout_id is not None:
+            GLib.source_remove(self._menu_timeout_id)
+            self._menu_timeout_id = None
 
     def _on_menu_timeout(self) -> bool:
         """Return to idle after a menu-selected looping animation preview."""

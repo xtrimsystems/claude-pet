@@ -63,13 +63,13 @@ Claude Pet installs hooks into Claude Code that write state changes to a file. T
 | Idle for 60s | Idle (wandering around) |
 | Last session ends | Pet exits |
 
-When idle, the pet wanders the screen Shimeji-style — walking along edges, climbing walls, sitting, kicking, jumping, and now and then riding a scooter across the screen or pulling a finger gun with a heart. Drag it around, throw it, or right-click it for the menu (scale, mascot, poses, scooter, finger gun, quit).
+When idle, the pet wanders the screen Shimeji-style — walking along edges, climbing walls, sitting, kicking, jumping, and now and then riding a scooter or a unicorn across the screen, teleporting, or pulling a trick (finger gun, a fly that won't leave him alone, vibing to music, popping his own head off). After 5 minutes without Claude activity he takes a nap of a minute or two (Claude starting, or grabbing him, wakes him up early), and during long work sessions he may doze off at his laptop. Everything in the menu works at any moment, even mid-nap or mid-trick. Drag it around, throw it, or right-click it for the menu (scale, mascot, poses, rides, teleport, tricks, quit).
 
 The hook script registers every live session in `/tmp/claude-pet-sessions/`; the pet is started by the first one and stopped by the last one, so several sessions, terminals and subagents share a single pet.
 
 ```bash
 make test-states   # cycle the pet through all states
-make sprites       # redraw the generated sprites (tools/draw_scooter.py, tools/draw_finger_gun.py)
+make sprites       # regenerate the Deadpool extras (sprites 54+ and sprites/deadpool/animations.json)
 make stop          # kill it
 ```
 

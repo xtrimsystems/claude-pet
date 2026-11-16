@@ -1,11 +1,9 @@
 import math
-import os
-import sys
 
 import cairo
 
-FIRST_INDEX = 54
 FRAME_COUNT = 3
+FRAME_MS = 90
 RIDER_SPRITE = 11
 RIDER_LIFT = 18
 
@@ -159,13 +157,6 @@ def draw_frame(rider, index):
     return surface
 
 
-def main(img_dir):
-    rider = cairo.ImageSurface.create_from_png(os.path.join(img_dir, f"shime{RIDER_SPRITE}.png"))
-    for index in range(FRAME_COUNT):
-        target = os.path.join(img_dir, f"shime{FIRST_INDEX + index}.png")
-        draw_frame(rider, index).write_to_png(target)
-        print(target)
-
-
-if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "sprites/deadpool/img")
+def animations(kit):
+    rider = kit.sprite(RIDER_SPRITE)
+    return [("scooter", "moves", [(draw_frame(rider, index), FRAME_MS) for index in range(FRAME_COUNT)], {})]
