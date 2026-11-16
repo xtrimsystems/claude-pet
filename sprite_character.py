@@ -181,6 +181,7 @@ class SpriteCharacter:
             },
         }
 
+        self._right_facing: dict[int, int] = {}
         self._load_extra_animations(mascot_path)
 
         # Replace missing sprite indices with fallback (first available sprite)
@@ -201,9 +202,15 @@ class SpriteCharacter:
             extras = json.load(f)
         self._state_config.update(extras.get("states", {}))
         self._move_config.update(extras.get("moves", {}))
+        self._right_facing = {int(index): twin for index, twin in extras.get("right_facing", {}).items()}
 
     def supports(self, animation: str) -> bool:
         return animation in self._state_config or animation in self._move_config
+
+    def max_overhang(self, animation: str) -> int:
+        cfg = self._state_config.get(animation) or self._move_config.get(animation)
+        surfaces = [self._sprites[index] for index in cfg["sprites"] if index in self._sprites] if cfg else []
+        return max((s.get_height() - s.get_width() for s in surfaces), default=0)
 
     def animation_ms(self, state: str) -> int:
         cfg = self._state_config[state]
@@ -272,29 +279,34 @@ class SpriteCharacter:
     # Drawing
     # ------------------------------------------------------------------
 
-    def draw(self, ctx: cairo.Context, width: int, height: int) -> None:
-        cfg = self._active_config()
-        sprites = cfg["sprites"]
+    def _current_surface(self) -> cairo.ImageSurface | None:
+        sprites = self._active_config()["sprites"]
         idx = sprites[self.frame % len(sprites)]
-        surface = self._sprites.get(idx)
+        if self.facing > 0:
+            idx = self._right_facing.get(idx, idx)
+        return self._sprites.get(idx)
+
+    def overhang(self) -> int:
+        surface = self._current_surface()
+        return surface.get_height() - surface.get_width() if surface else 0
+
+    def draw(self, ctx: cairo.Context, width: int, height: int) -> None:
+        surface = self._current_surface()
         if surface is None:
             return
 
-        sprite_w = surface.get_width()
-        sprite_h = surface.get_height()
-
         ctx.save()
 
-        # Scale sprite to fill the window
-        sx = width / sprite_w
-        sy = height / sprite_h
+        # Scale to the window width; frames taller than wide stand on the bottom edge
+        scale = width / surface.get_width()
+        ctx.translate(0, height - surface.get_height() * scale)
 
         # Flip horizontally when facing right (sprites face left by default)
         if self.facing > 0:
             ctx.translate(width, 0)
-            ctx.scale(-sx, sy)
+            ctx.scale(-scale, scale)
         else:
-            ctx.scale(sx, sy)
+            ctx.scale(scale, scale)
 
         ctx.set_source_surface(surface, 0, 0)
         ctx.get_source().set_filter(cairo.FILTER_NEAREST)

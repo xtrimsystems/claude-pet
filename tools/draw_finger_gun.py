@@ -150,19 +150,25 @@ def burst(target):
     ctx.stroke()
 
 
-def build(img_dir):
+def gun_layers(img_dir):
     sitting = load(img_dir, SITTING)
-    gun_pose = load(img_dir, GUN_POSE)
-
-    bubble = crop(gun_pose, BUBBLE_BOX)
-    flag = crop(gun_pose, FLAG_BOX)
-    aimed_bare = copy(gun_pose)
+    aimed_bare = copy(load(img_dir, GUN_POSE))
     clear(aimed_bare, *BUBBLE_BOX)
     clear(aimed_bare, *FLAG_BOX)
     arm = pixels_that_differ(aimed_bare, sitting, ARM_REGIONS)
     unarmed = copy(aimed_bare)
     erase_pixels(unarmed, arm)
     underpaint(unarmed, sitting, ARM_REGIONS)
+    return aimed_bare, arm, unarmed
+
+
+def build(img_dir):
+    sitting = load(img_dir, SITTING)
+    gun_pose = load(img_dir, GUN_POSE)
+
+    bubble = crop(gun_pose, BUBBLE_BOX)
+    flag = crop(gun_pose, FLAG_BOX)
+    aimed_bare, arm, unarmed = gun_layers(img_dir)
 
     smirk = copy(sitting)
     paint_clipped(smirk, gun_pose, EYE_PATCHES, *HEAD_SHIFT)
@@ -198,7 +204,6 @@ def build(img_dir):
         "bubble_big": with_bubble(1.15),
         "bubble_beat": with_bubble(1.08),
     }
-
 
 
 def animations(kit):

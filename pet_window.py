@@ -42,6 +42,8 @@ class CharacterProto(Protocol):
     def set_movement(self, move: str, facing: int) -> None: ...
     def supports(self, animation: str) -> bool: ...
     def animation_ms(self, state: str) -> int: ...
+    def overhang(self) -> int: ...
+    def max_overhang(self, animation: str) -> int: ...
 
 
 class ClaudeBridgeProto(Protocol):
@@ -61,8 +63,14 @@ NAP_STATES = ("nap_start", "napping", "nap_wake")
 DOZE_AFTER_WORKING_S = 90
 DOZE_MEAN_WAIT_S = 120
 DOZE_COOLDOWN_S = 300
+SIGN_STATES = ("sign_effort", "sign_nailed")
+EFFORT_SIGN_COOLDOWN_S = 600
+NAILED_IT_CHANCE = 1 / 3
 TRICKS = (("Finger gun", "finger_gun"), ("The fly", "fly_gag"), ("Vibing", "vibing"),
-          ("Head pop", "head_pop"), ("Nap", "nap_start"), ("Dozing at the laptop", "laptop_doze"))
+          ("Head pop", "head_pop"), ("Mariachi", "mariachi"), ("Fourth wall", "fourth_wall"),
+          ("Zen", "zen"), ("Disco", "disco"), ("Nap", "nap_start"), ("Dozing at the laptop", "laptop_doze"),
+          ("Maximum effort sign", "sign_effort"), ("Nailed it sign", "sign_nailed"))
+TRIP_MENU = (("Scooter", "scooter"), ("Unicorn", "unicorn"), ("Balloon", "balloon"), ("Box sneak", "box"))
 
 TRANSPARENT_CSS = b"window.claude-pet { background-color: transparent; }"
 
@@ -93,12 +101,16 @@ class Move(enum.Enum):
     SIT = "sit"
     SCOOTER = "scooter"
     UNICORN = "unicorn"
+    BALLOON = "balloon"
+    BOX = "box"
 
 
-RIDES = {"scooter": Move.SCOOTER, "unicorn": Move.UNICORN}
+TRIPS = {"scooter": Move.SCOOTER, "unicorn": Move.UNICORN, "balloon": Move.BALLOON, "box": Move.BOX}
 STATE_BEHAVIORS = {"clone_kill": "clone_kill", "error": "error", "finger_gun": "finger_gun",
-                   "fly_gag": "fly_gag", "vibing": "vibing", "head_pop": "head_pop", "teleport": "teleport_out"}
-OPTIONAL_BEHAVIORS = {"scooter", "unicorn", "teleport", "finger_gun", "fly_gag", "vibing", "head_pop"}
+                   "fly_gag": "fly_gag", "vibing": "vibing", "head_pop": "head_pop", "teleport": "teleport_out",
+                   "mariachi": "mariachi", "fourth_wall": "fourth_wall", "zen": "zen", "disco": "disco"}
+OPTIONAL_BEHAVIORS = {"scooter", "unicorn", "balloon", "box", "teleport", "finger_gun", "fly_gag", "vibing",
+                      "head_pop", "mariachi", "fourth_wall", "zen", "disco"}
 
 
 class WanderEngine:
@@ -130,16 +142,27 @@ class WanderEngine:
     RIDE_SPEED_MAX = 4.5           # px/frame cruising (~270 px/sec)
     RIDE_ACCEL = 0.06              # px/frame² until cruising speed
     RIDE_BRAKE = 0.05              # speed cap per px left to the edge
+    BALLOON_SPEED = 1.6            # px/frame rising
+    BALLOON_ACCEL = 0.02
+    BALLOON_DRIFT = 0.25           # px/frame sideways while rising
+    BALLOON_MIN_RISE = 0.45        # of the screen height
+    BOX_SPEED = 0.7                # px/frame sneaking
+    BOX_TRIP = (480, 900)          # frames: 8–15 s in the box
+    BOX_PEEK_EVERY = (150, 330)    # frames between crouch-and-look stops
 
     # Behavior weights (higher = more likely to be chosen)
     #   sit:   stay put          walk:  walk on ground
     #   climb: climb nearest edge
     #   scooter / unicorn: ride across the screen to the far edge
+    #   balloon: float up, the balloon pops, fall down
+    #   box: sneak along the ground inside a cardboard box
     #   teleport: vanish in smoke, reappear elsewhere on the ground
-    CALM_WEIGHTS   = {"sit": 120, "walk": 80, "climb": 20, "kick": 10, "jump": 4, "scooter": 6, "unicorn": 4, "teleport": 4,
-                      "finger_gun": 4, "fly_gag": 3, "vibing": 4, "head_pop": 3, "clone_kill": 3, "error": 3}
-    ACTIVE_WEIGHTS = {"sit":  50, "walk": 150, "climb": 40, "kick": 18, "jump": 7, "scooter": 12, "unicorn": 8, "teleport": 8,
-                      "finger_gun": 6, "fly_gag": 5, "vibing": 6, "head_pop": 5, "clone_kill": 5, "error": 5}
+    CALM_WEIGHTS   = {"sit": 120, "walk": 80, "climb": 20, "kick": 10, "jump": 4, "scooter": 6, "unicorn": 4,
+                      "balloon": 3, "box": 3, "teleport": 4, "finger_gun": 4, "fly_gag": 3, "vibing": 4, "head_pop": 3,
+                      "mariachi": 4, "fourth_wall": 3, "zen": 3, "disco": 3, "clone_kill": 3, "error": 3}
+    ACTIVE_WEIGHTS = {"sit":  50, "walk": 150, "climb": 40, "kick": 18, "jump": 7, "scooter": 12, "unicorn": 8,
+                      "balloon": 5, "box": 5, "teleport": 8, "finger_gun": 6, "fly_gag": 5, "vibing": 6, "head_pop": 5,
+                      "mariachi": 6, "fourth_wall": 5, "zen": 5, "disco": 5, "clone_kill": 5, "error": 5}
     STUMBLE_CHANCE = 0.0003      # per frame while walking (~2% per second)
 
     # Sit durations (frames at 60 fps)
@@ -181,6 +204,9 @@ class WanderEngine:
         self._jump_vy = 0.0
         self._jump_peak_y = 0.0
         self._ride_speed = 0.0
+        self._balloon_top = 0.0
+        self._peek_timer = 0
+        self.balloon_overhang = 0.0
         self.extras: set[str] = set()
         self.pending_anim: str | None = None
 
@@ -235,8 +261,8 @@ class WanderEngine:
                     return Move.KICK
                 elif behavior == "jump":
                     return Move.JUMP
-                elif behavior in RIDES:
-                    return RIDES[behavior]
+                elif behavior in TRIPS:
+                    return TRIPS[behavior]
                 elif behavior in STATE_BEHAVIORS:
                     return behavior
         return Move.SIT
@@ -279,6 +305,10 @@ class WanderEngine:
             self._do_sit()
         elif self.move_state in (Move.SCOOTER, Move.UNICORN):
             self._do_ride()
+        elif self.move_state == Move.BALLOON:
+            self._do_balloon()
+        elif self.move_state == Move.BOX:
+            self._do_box()
 
         self.x = max(self.x_min, min(self.x, self.x_max))
         self.y = max(self.y_min, min(self.y, self.y_max))
@@ -406,8 +436,8 @@ class WanderEngine:
             self._start_kick()
         elif nxt == Move.JUMP:
             self._start_jump()
-        elif nxt in (Move.SCOOTER, Move.UNICORN):
-            self._start_ride(nxt)
+        elif nxt in TRIPS.values():
+            self.start_trip(nxt)
         else:
             self._start_walk()
 
@@ -423,11 +453,20 @@ class WanderEngine:
         lo, hi = self._walk_range()
         self._walk_timer = random.randint(lo, hi)
 
+    def start_trip(self, trip: Move) -> None:
+        if trip == Move.BALLOON:
+            self._start_balloon()
+        elif trip == Move.BOX:
+            self._start_box()
+        else:
+            self._start_ride(trip)
+
+    def _face_open_side(self) -> None:
+        self.direction = 1 if self.x_max - self.x > self.x - self.x_min else -1
+
     def _start_ride(self, ride: Move) -> None:
         self.move_state = ride
-        room_left = self.x - self.x_min
-        room_right = self.x_max - self.x
-        self.direction = 1 if room_right > room_left else -1
+        self._face_open_side()
         self._ride_speed = self.RIDE_SPEED_START
 
     def _do_ride(self) -> None:
@@ -442,6 +481,46 @@ class WanderEngine:
         self.x = max(self.x_min, min(self.x, self.x_max))
         self.direction = -self.direction
         self._start_sit()
+
+    def _start_balloon(self) -> None:
+        self.move_state = Move.BALLOON
+        self.pending_anim = "balloon_grab"
+        self.y = self.y_max
+        self._ride_speed = 0.0
+        highest = self.y_min + self.balloon_overhang
+        lowest = self.y_max - (self.y_max - self.y_min) * self.BALLOON_MIN_RISE
+        self._balloon_top = random.uniform(highest, max(highest, lowest))
+
+    def _do_balloon(self) -> None:
+        self._ride_speed = min(self._ride_speed + self.BALLOON_ACCEL, self.BALLOON_SPEED)
+        self.y -= self._ride_speed
+        self.x += self.BALLOON_DRIFT * self.direction
+        if not self.x_min < self.x < self.x_max:
+            self.direction = -self.direction
+        if self.y <= self._balloon_top:
+            self.y = self._balloon_top
+            self.pending_anim = "balloon_pop"
+            self._start_fall()
+
+    def _start_box(self) -> None:
+        self.move_state = Move.BOX
+        self.pending_anim = "box_on"
+        self.y = self.y_max
+        self._face_open_side()
+        self._walk_timer = random.randint(*self.BOX_TRIP)
+        self._peek_timer = random.randint(*self.BOX_PEEK_EVERY)
+
+    def _do_box(self) -> None:
+        self.y = self.y_max
+        self.x += self.BOX_SPEED * self.direction
+        self._walk_timer -= 1
+        self._peek_timer -= 1
+        if self._walk_timer <= 0 or not self.x_min < self.x < self.x_max:
+            self.pending_anim = "box_off"
+            self._start_sit()
+        elif self._peek_timer <= 0:
+            self.pending_anim = "box_peek"
+            self._peek_timer = random.randint(*self.BOX_PEEK_EVERY)
 
     def teleport(self) -> None:
         span = self.x_max - self.x_min
@@ -614,9 +693,10 @@ class SpriteArea(Gtk.DrawingArea):
         self.set_size(size)
         self.set_draw_func(self._on_draw)
 
-    def set_size(self, size: int) -> None:
-        self.set_content_width(size)
-        self.set_content_height(size)
+    def set_size(self, width: int, height: int | None = None) -> None:
+        if (width, height or width) != (self.get_content_width(), self.get_content_height()):
+            self.set_content_width(width)
+            self.set_content_height(height or width)
 
     def set_painter(self, painter) -> None:
         self._draw_sprite = painter
@@ -667,10 +747,10 @@ class MonitorOverlay(Gtk.Window):
         self._input_rects: list[Rect] = []
         self.connect("realize", lambda w: self._apply_input_region())
 
-    def place(self, area: SpriteArea, global_x: int, global_y: int, size: int) -> bool:
+    def place(self, area: SpriteArea, global_x: int, global_y: int) -> bool:
         """Show `area` at a global desktop position if it touches this monitor."""
         mx, my, _, _ = self.rect
-        if not _intersects((global_x, global_y, size, size), self.rect):
+        if not _intersects((global_x, global_y, area.get_content_width(), area.get_content_height()), self.rect):
             self.park(area)
             return False
         self._fixed.move(area, global_x - mx, global_y - my)
@@ -767,6 +847,8 @@ class Pet:
         self._menu_move = False
         self._working_since: float | None = None
         self._last_doze = -DOZE_COOLDOWN_S
+        self._last_effort_sign = -EFFORT_SIGN_COOLDOWN_S
+        self._shown_overhang = 0
 
         self._overlays: list[MonitorOverlay] = []
         self._display = Gdk.Display.get_default()
@@ -848,6 +930,7 @@ class Pet:
         if self._wander is not None:
             self._wander.extras = {behavior for behavior in OPTIONAL_BEHAVIORS
                                    if self.character.supports(STATE_BEHAVIORS.get(behavior, behavior))}
+            self._wander.balloon_overhang = self.character.max_overhang("balloon") * self._size / SPRITE_BASE
 
     # ------------------------------------------------------------------
     # Timers
@@ -871,7 +954,7 @@ class Pet:
             if self._after_nap:
                 self.character.set_state(self._after_nap)
                 self._after_nap = None
-        elif finished == "laptop_doze":
+        elif finished in ("laptop_doze", "sign_effort"):
             self._resume_claude_state()
 
     def _resume_claude_state(self) -> None:
@@ -1014,6 +1097,8 @@ class Pet:
                 Move.JUMP: "jump_launch",
                 Move.SCOOTER: "scooter",
                 Move.UNICORN: "unicorn",
+                Move.BALLOON: "balloon",
+                Move.BOX: "box",
             }
             move_name = move_map.get(self._wander.move_state, "")
             # Climb sprites face left; face toward the wall
@@ -1025,7 +1110,7 @@ class Pet:
                 facing = self._wander.direction
             self.character.set_movement(move_name, facing)
 
-        if moved or self._drag_active:
+        if moved or self._drag_active or self.character.overhang() != self._shown_overhang:
             self._render()
         elif self._visual_key() != prev_visual:
             self._redraw_sprite()
@@ -1046,6 +1131,8 @@ class Pet:
         climbs, so it is clipped to its monitor — only a drag may span monitors.
         """
         x, y = self._sprite_pos()
+        self._shown_overhang = self.character.overhang()
+        overhang = round(self._shown_overhang * self._size / SPRITE_BASE)
         active = None if self._drag_active else self._overlays[self._wander._active_idx]
         for overlay in self._overlays:
             if active is not None and overlay is not active:
@@ -1054,10 +1141,11 @@ class Pet:
                 overlay.update_input_region()
                 continue
             overlay.sprite.set_painter(self.character.draw)
-            overlay.place(overlay.sprite, x, y, self._size)
+            overlay.sprite.set_size(self._size, self._size + overhang)
+            overlay.place(overlay.sprite, x, y - overhang)
             if self._clone is not None:
                 overlay.clone.set_painter(self._draw_clone)
-                overlay.place(overlay.clone, self._clone["x"], self._clone["y"], self._size)
+                overlay.place(overlay.clone, self._clone["x"], self._clone["y"])
             else:
                 overlay.park(overlay.clone)
             overlay.update_input_region()
@@ -1109,6 +1197,9 @@ class Pet:
             return False
         if self.character.state == "laptop_doze" and new_state == "working":
             return False
+        if self.character.state in SIGN_STATES and new_state in ("thinking", "working"):
+            return False
+        new_state = self._with_sign(new_state)
         if new_state and new_state != self.character.state:
             logger.debug("Bridge callback: %s -> %s", self.character.state, new_state)
             # "doubling" triggers clone-kill — lock out bridge until animation finishes
@@ -1116,6 +1207,20 @@ class Pet:
                 self._manual_override = True
             self.character.set_state(new_state)
         return False
+
+    def _with_sign(self, claude_state: str) -> str:
+        now = time.monotonic()
+        if (claude_state == "thinking"
+                and self.character.state not in ONGOING_CLAUDE_STATES
+                and now - self._last_effort_sign > EFFORT_SIGN_COOLDOWN_S
+                and self.character.supports("sign_effort")):
+            self._last_effort_sign = now
+            return "sign_effort"
+        if (claude_state == "celebrating"
+                and self.character.supports("sign_nailed")
+                and random.random() < NAILED_IT_CHANCE):
+            return "sign_nailed"
+        return claude_state
 
     # ------------------------------------------------------------------
     # Input
@@ -1276,9 +1381,9 @@ class Pet:
         section = Gio.Menu()
         section.append("Kick", "pet.kick")
         section.append("Jump", "pet.jump")
-        for label, ride in (("Scooter", "scooter"), ("Unicorn", "unicorn")):
-            if self.character.supports(ride):
-                section.append_item(self._menu_item(label, "pet.ride", ride))
+        for label, trip in TRIP_MENU:
+            if self.character.supports(trip):
+                section.append_item(self._menu_item(label, "pet.ride", trip))
         if self.character.supports("teleport_out"):
             section.append_item(self._menu_item("Teleport", "pet.state", "teleport_out"))
         section.append("Clone & Kill", "pet.clone-kill")
@@ -1339,8 +1444,8 @@ class Pet:
         self._start_menu_move(lambda: self._wander._start_jump())
 
     def _on_menu_ride(self, action, value) -> None:
-        ride = RIDES[value.get_string()]
-        self._start_menu_move(lambda: self._wander._start_ride(ride))
+        trip = TRIPS[value.get_string()]
+        self._start_menu_move(lambda: self._wander.start_trip(trip))
 
     def _on_menu_clone_kill(self, action, param) -> None:
         if self._clone is not None:
