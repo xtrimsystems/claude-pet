@@ -38,7 +38,7 @@ Shimeji-style desktop pet for Claude Code. A transparent, click-through overlay 
 ```
 
 ### Extra animations (`<mascot>/animations.json`):
-`{"states": {name: config}, "moves": {name: config}}`, merged over the built-in dicts. Generated for Deadpool by `make sprites`; never edit it by hand. A mascot without the file (Jake, Naruto) simply has none of the extras: they are left out of the random pool and the menu.
+`{"states": {name: config}, "moves": {name: config}}`, merged over the built-in dicts. Generated for Deadpool by `make sprites`; never edit it by hand. A mascot without the file (e.g. a standard Shimeji pack) simply has none of the extras: they are left out of the random pool and the menu.
 
 ### Loop behavior:
 - **`"loop": True`** (default if omitted) - loops **forever** until state changes externally. Used for ongoing states: idle, thinking, working, attention.
