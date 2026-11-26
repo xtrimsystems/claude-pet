@@ -8,12 +8,22 @@ CHEERING = 50
 WALK_CYCLE = (1, 2, 1, 3)
 
 BALLOON_OVERHANG = 100
-BALLOON_RED = (0.86, 0.12, 0.14)
-BALLOON_SHINE = (1.0, 0.75, 0.75)
+BALLOON_BLUE = (0.18, 0.44, 0.84)
+BALLOON_SHINE = (0.78, 0.88, 1.0)
 BALLOON_CENTER = (86, 42)
 BALLOON_RX, BALLOON_RY = 33, 39
+KNOT_LENGTH = 7
 STRING = (0.12, 0.12, 0.12)
-BACK = (80, BALLOON_OVERHANG + 92)
+STEEL = (0.66, 0.68, 0.73)
+STEEL_SHINE = (0.93, 0.95, 0.98)
+HOOK_SHANK, HOOK_RADIUS, HOOK_TIP = 13.8, 3.5, 3
+HOOKED_SWING = 5
+HOOKED_AT = (BALLOON_CENTER[0] + HOOKED_SWING - HOOK_RADIUS, BALLOON_OVERHANG + 99)
+HOOK_TIE = (HOOKED_AT[0] + HOOK_RADIUS, HOOKED_AT[1] - HOOK_SHANK)
+STRING_LENGTH = HOOK_TIE[1] - (BALLOON_CENTER[1] + BALLOON_RY + KNOT_LENGTH)
+FAR_BEHIND_HIM = ((100, 150, 0.35), (105, 124, 0.48), (104, 98, 0.62), (99, 74, 0.76), (93, 57, 0.88))
+SWEAT = (0.62, 0.85, 1.0)
+SWEAT_ON_BROW = (39, BALLOON_OVERHANG + 30)
 
 
 def tall(overhang):
@@ -23,47 +33,92 @@ def tall(overhang):
     return surface, ctx
 
 
-def big_balloon(ctx, cx, cy, tilt=0):
+def big_balloon(ctx, cx, cy, tilt=0, scale=1.0):
     ctx.save()
     ctx.translate(cx, cy)
     ctx.rotate(math.radians(tilt))
-    knot = lambda c: (c.move_to(0, BALLOON_RY - 1), c.line_to(-4.5, BALLOON_RY + 7), c.line_to(4.5, BALLOON_RY + 7),
-                      c.close_path())
-    silhouette(ctx, [ellipse(0, 0, BALLOON_RX, BALLOON_RY), knot], BALLOON_RED, 1.25)
+    ctx.scale(scale, scale)
+    knot = lambda c: (c.move_to(0, BALLOON_RY - 1), c.line_to(-4.5, BALLOON_RY + KNOT_LENGTH),
+                      c.line_to(4.5, BALLOON_RY + KNOT_LENGTH), c.close_path())
+    silhouette(ctx, [ellipse(0, 0, BALLOON_RX, BALLOON_RY), knot], BALLOON_BLUE, 1.25)
     ctx.set_source_rgba(*BALLOON_SHINE, 0.9)
-    ellipse(-BALLOON_RX * 0.48, -BALLOON_RY * 0.45, 5, 10, 28)(ctx)
-    ctx.fill()
-    ctx.set_source_rgba(1, 1, 1, 0.9)
-    ellipse(-BALLOON_RX * 0.62, -BALLOON_RY * 0.1, 2, 3.2, 20)(ctx)
-    ctx.fill()
-    ctx.set_source_rgb(*OUTLINE)
-    ctx.arc(3, 6, 13, 0, 2 * math.pi)
-    ctx.fill()
-    ctx.set_source_rgb(*BALLOON_RED)
-    ctx.arc(3, 6, 9, 0, 2 * math.pi)
-    ctx.fill()
-    ctx.set_source_rgb(*OUTLINE)
-    ctx.rectangle(1, -5, 4, 22)
+    ellipse(-BALLOON_RX * 0.55, -BALLOON_RY * 0.55, 4, 8, 32)(ctx)
     ctx.fill()
     ctx.restore()
 
 
-def knot_point(cx, cy, tilt):
+def knot_point(cx, cy, tilt, scale=1.0):
     a = math.radians(tilt)
-    return cx - (BALLOON_RY + 7) * math.sin(a), cy + (BALLOON_RY + 7) * math.cos(a)
+    reach = (BALLOON_RY + KNOT_LENGTH) * scale
+    return cx - reach * math.sin(a), cy + reach * math.cos(a)
 
 
-def lifted(base, center=BALLOON_CENTER, sway=0, slack=0.0, extra=None):
+def hook(ctx, x, y, scale=1.0):
+    ctx.save()
+    ctx.translate(x, y)
+    ctx.scale(scale, scale)
+    r = HOOK_RADIUS
+    shape = lambda c: (c.move_to(r, -HOOK_SHANK + 2), c.line_to(r, 0), c.arc(0, 0, r, 0, math.pi),
+                       c.line_to(-r, -HOOK_TIP))
+    for width, color in ((3.4, OUTLINE), (1.6, STEEL)):
+        ctx.set_source_rgb(*color)
+        ctx.set_line_width(width)
+        shape(ctx)
+        ctx.stroke()
+    filled(ctx, STEEL, circle(r, -HOOK_SHANK, 2), 1.2)
+    ctx.set_source_rgb(*STEEL_SHINE)
+    ctx.rectangle(r - 0.5, -HOOK_SHANK + 4, 1, 5)
+    ctx.fill()
+    ctx.restore()
+
+
+def hanging_string(ctx, knot, tie, swing):
+    ctx.set_source_rgb(*STRING)
+    ctx.set_line_width(1.3)
+    ctx.move_to(*knot)
+    ctx.curve_to(knot[0] + swing * 0.2, knot[1] + (tie[1] - knot[1]) * 0.4,
+                 tie[0] - swing * 0.4, tie[1] - (tie[1] - knot[1]) * 0.3, *tie)
+    ctx.stroke()
+
+
+def sweat_drop(ctx, x, y):
+    def drop(c):
+        c.move_to(x, y - 6)
+        c.curve_to(x + 1.5, y - 2, x + 4, y + 1, x + 4, y + 3.5)
+        c.arc(x, y + 3.5, 4, 0, math.pi)
+        c.curve_to(x - 4, y + 1, x - 1.5, y - 2, x, y - 6)
+        c.close_path()
+    filled(ctx, SWEAT, drop, 1.3)
+    ctx.set_source_rgb(1, 1, 1)
+    ellipse(x - 1.5, y + 3, 0.9, 1.4)(ctx)
+    ctx.fill()
+
+
+def drifting_in(base, cx, cy, scale, swing):
+    surface, ctx = tall(BALLOON_OVERHANG)
+    knot = knot_point(cx, cy, 0, scale)
+    tie = (knot[0] + swing * scale, knot[1] + STRING_LENGTH * scale)
+    hanging_string(ctx, knot, tie, swing)
+    hook(ctx, tie[0] - HOOK_RADIUS * scale, tie[1] + HOOK_SHANK * scale, scale)
+    big_balloon(ctx, cx, cy, scale=scale)
+    paint(surface, base, dy=BALLOON_OVERHANG)
+    return surface
+
+
+def lifted(base, center=BALLOON_CENTER, sway=0, slack=0.0, behind=None, extra=None):
     surface, ctx = tall(BALLOON_OVERHANG)
     cx, cy = center[0] + sway, center[1]
     tilt = sway * 3
     ctx.set_source_rgb(*STRING)
     ctx.set_line_width(1.3)
-    ctx.move_to(*BACK)
-    ctx.curve_to(114 + 10 * slack, BALLOON_OVERHANG + 80, 108 - 12 * slack, BALLOON_OVERHANG + 10 + 20 * slack,
+    ctx.move_to(*HOOK_TIE)
+    ctx.curve_to(110 + 10 * slack, BALLOON_OVERHANG + 70, 106 - 12 * slack, BALLOON_OVERHANG + 10 + 20 * slack,
                  *knot_point(cx, cy, tilt))
     ctx.stroke()
     big_balloon(ctx, cx, cy, tilt)
+    hook(ctx, *HOOKED_AT)
+    if behind:
+        behind(ctx)
     paint(surface, base, dy=BALLOON_OVERHANG)
     if extra:
         extra(context(surface))
@@ -74,16 +129,17 @@ def popped(base, flash=True, extra=None):
     surface, ctx = tall(BALLOON_OVERHANG)
     ctx.set_source_rgb(*STRING)
     ctx.set_line_width(1.3)
-    ctx.move_to(*BACK)
-    ctx.curve_to(104, BALLOON_OVERHANG + 88, 112, BALLOON_OVERHANG + 70, 106, BALLOON_OVERHANG + 58)
+    ctx.move_to(*HOOK_TIE)
+    ctx.curve_to(100, BALLOON_OVERHANG + 76, 112, BALLOON_OVERHANG + 66, 106, BALLOON_OVERHANG + 54)
     ctx.stroke()
     if flash:
         burst(ctx, *BALLOON_CENTER, 18, 40, range(0, 360, 24), GOLD, 3)
         for k in range(7):
             a = math.radians(k * 51 + 10)
-            filled(ctx, BALLOON_RED, ellipse(BALLOON_CENTER[0] + 30 * math.cos(a), BALLOON_CENTER[1] + 30 * math.sin(a),
+            filled(ctx, BALLOON_BLUE, ellipse(BALLOON_CENTER[0] + 30 * math.cos(a), BALLOON_CENTER[1] + 30 * math.sin(a),
                                              4.5, 2.4, k * 40), 1.2)
         outlined_text(ctx, "POP!", BALLOON_CENTER[0] - 22, BALLOON_CENTER[1] + 7, 18, fill=GOLD, width=3)
+    hook(ctx, *HOOKED_AT)
     paint(surface, base, dy=BALLOON_OVERHANG)
     if extra:
         extra(context(surface))
@@ -92,14 +148,22 @@ def popped(base, flash=True, extra=None):
 
 def balloon(kit):
     stand, dangle = kit.sprite(STANDING), kit.sprite(DANGLING)
-    look_up = move_eyes(stand, 1, -3)
-    grab = [(lifted(stand, (BALLOON_CENTER[0], -100)), 400), (lifted(look_up, (BALLOON_CENTER[0], -100)), 300)]
-    grab += [(lifted(look_up, (BALLOON_CENTER[0], y), slack=1 - k / 6), 90) for k, y in enumerate((-70, -40, -12, 14, 34, 42))]
-    grab += [(lifted(look_up, slack=0.3), 300),
-             (lifted(stand, extra=lambda c: exclamation(c, 30, BALLOON_OVERHANG + 4)), 250)]
-    looking_down = move_eyes(dangle, -2, 2)
-    rising = [(lifted(dangle if k < 8 else looking_down, sway=sway), 90)
-              for k, sway in enumerate((0, 1, 2, 1, 0, -1, -2, -1) * 2)]
+    look_back = move_eyes(stand, 3, -3)
+    swings = (-6, 4, 9, 5, 0)
+    grab = [(STANDING, 300)]
+    grab += [(drifting_in(stand if k < 2 else look_back, x, y, scale, swing), 120)
+             for k, ((x, y, scale), swing) in enumerate(zip(FAR_BEHIND_HIM, swings))]
+    grab += [(drifting_in(look_back, *BALLOON_CENTER, 1.0, swing), ms) for swing, ms in ((7, 140), (HOOKED_SWING, 140))]
+    clink = lambda c: burst(c, HOOKED_AT[0] + 2, HOOKED_AT[1] - 2, 5, 10, (-40, 0, 40), (1, 1, 1), 1.6)
+    alarm = lambda c: exclamation(c, 30, BALLOON_OVERHANG + 4)
+    sweating = lambda c: sweat_drop(c, *SWEAT_ON_BROW)
+    shocked = resize_eyes(stand, 0.45)
+    looking_down_scared = resize_eyes(eyes_from(dangle, stand), 0.5, -1, 3)
+    grab += [(lifted(look_back, slack=0.8, behind=clink), 120),
+             (lifted(shocked, slack=0.6, extra=alarm), 400),
+             (lifted(looking_down_scared, slack=0.0, extra=sweating), 200)]
+    rising = [(lifted(looking_down_scared, sway=sway, extra=sweating), 90)
+              for sway in (0, 1, 2, 1, 0, -1, -2, -1) * 2]
     look_up = move_eyes(dangle, 2, -3)
     pop = [(popped(dangle), 110),
            (popped(look_up, False, lambda c: exclamation(c, 26, BALLOON_OVERHANG + 2)), 350)]

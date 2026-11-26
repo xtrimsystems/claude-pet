@@ -210,6 +210,34 @@ def move_eyes(source, dx, dy, blobs=None):
     return surface
 
 
+def _eye_layer(source, blob):
+    x0, y0, x1, y1 = blob
+    layer = crop_rects(source, [(x0 - 1, y0 - 1, x1 - x0 + 3, y1 - y0 + 3)])
+    data, stride = _pixels(layer)
+    for i in range(0, stride * SIZE, 4):
+        if data[i + 1] <= 12:
+            data[i:i + 4] = bytes(4)
+    layer.mark_dirty()
+    return layer
+
+
+def resize_eyes(source, scale, dx=0, dy=0):
+    blobs = eye_blobs(source)
+    surface = close_eyes(source, 1.0, blobs)
+    for blob in blobs:
+        x0, y0, x1, y1 = blob
+        center = ((x0 + x1 + 1) / 2, (y0 + y1 + 1) / 2)
+        paint(surface, _eye_layer(source, blob), dx=dx, dy=dy, pivot=center, scale=scale)
+    return surface
+
+
+def eyes_from(source, donor):
+    surface = close_eyes(source, 1.0)
+    for blob in eye_blobs(donor):
+        paint(surface, _eye_layer(donor, blob))
+    return surface
+
+
 def silhouette(ctx, shapes, fill, width=LINE_WIDTH):
     ctx.set_source_rgb(*OUTLINE)
     ctx.set_line_width(2 * width)
