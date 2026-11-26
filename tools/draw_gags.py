@@ -3,131 +3,8 @@ import random
 
 import cairo
 
-import draw_finger_gun as finger_gun
 from draw_extras import ONE_SHOT, SITTING, STANDING
 from sprite_kit import *
-
-STRAW = (0.96, 0.82, 0.46)
-STRAW_DARK = (0.78, 0.58, 0.26)
-BAND_GREEN = (0.10, 0.58, 0.32)
-FLASH = (1.0, 0.86, 0.30)
-FLASH_CORE = (1.0, 0.98, 0.85)
-NEAR_SHOULDER = finger_gun.SHOULDER
-FAR_SHOULDER = (84, 101)
-MUZZLE = (31, 95)
-HAT = (75, 40)
-GUNS_UP = 28
-RECOIL = 8
-
-
-def sombrero(ctx, cx, cy, squash=1.0):
-    ctx.save()
-    ctx.translate(cx, cy)
-    ctx.rotate(math.radians(-4))
-    ctx.scale(1.0 / squash ** 0.5, squash)
-    filled(ctx, STRAW, ellipse(0, 0, 52, 10), 2.4)
-    ctx.set_source_rgb(*STRAW_DARK)
-    ctx.set_line_width(1.4)
-    ellipse(0, -0.5, 44, 7)(ctx)
-    ctx.stroke()
-    for k in range(18):
-        a = math.radians(8 + k * 9.6)
-        ctx.set_source_rgb(*(MARK_RED if k % 2 else BAND_GREEN))
-        ctx.arc(49 * math.cos(a), 9.4 * math.sin(a) + 1.2, 1.8, 0, 2 * math.pi)
-        ctx.fill()
-    crown = lambda c: (c.move_to(-29, 1), c.curve_to(-25, -12, -13, -34, 0, -34),
-                       c.curve_to(13, -34, 25, -12, 29, 1), c.curve_to(10, 5, -10, 5, -29, 1), c.close_path())
-    filled(ctx, STRAW, crown, 2.4)
-    ctx.save()
-    crown(ctx)
-    ctx.clip()
-    ctx.set_source_rgb(*BAND_GREEN)
-    ctx.rectangle(-30, -8, 60, 9)
-    ctx.fill()
-    ctx.set_source_rgb(1, 1, 1)
-    ctx.set_line_width(1.7)
-    for k in range(13):
-        x = -30 + k * 5
-        ctx.move_to(x, -1.5)
-        ctx.line_to(x + 2.5, -6.5)
-        ctx.line_to(x + 5, -1.5)
-    ctx.stroke()
-    ctx.set_source_rgb(*STRAW_DARK)
-    ctx.set_line_width(1.3)
-    ctx.move_to(-5, -31)
-    ctx.curve_to(-11, -20, -12, -14, -11, -9)
-    ctx.stroke()
-    ctx.restore()
-    ctx.set_source_rgb(*OUTLINE)
-    ctx.set_line_width(2)
-    ctx.move_to(-28.5, -8.5)
-    ctx.line_to(28.5, -8.5)
-    ctx.stroke()
-    ctx.restore()
-
-
-def muzzle_flash(ctx, x, y, angle):
-    ctx.save()
-    ctx.translate(x, y)
-    ctx.rotate(math.radians(angle))
-
-    def spikes(c):
-        for k in range(12):
-            a = math.radians(k * 30)
-            rx, ry = (11, 8) if k % 2 == 0 else (4.5, 3.5)
-            (c.move_to if k == 0 else c.line_to)(rx * math.cos(a) - 5, ry * math.sin(a))
-        c.close_path()
-    filled(ctx, FLASH, spikes, 1.6)
-    ctx.set_source_rgb(*FLASH_CORE)
-    ellipse(-5, 0, 4, 2.6)(ctx)
-    ctx.fill()
-    ctx.restore()
-
-
-def mariachi(kit):
-    _, arm, unarmed = finger_gun.gun_layers(kit.img_dir)
-    drop_specks(arm)
-    far_arm, ctx = blank()
-    ctx.translate(FAR_SHOULDER[0], 0)
-    ctx.scale(-1, 1)
-    ctx.translate(-NEAR_SHOULDER[0], 0)
-    ctx.set_source_surface(arm, 0, 0)
-    ctx.paint()
-    sit = kit.sprite(SITTING)
-    head_x, head_y = finger_gun.HEAD_SHIFT
-
-    def pose(near=None, far=None, hat_dy=0, squash=1.0, flash_near=False, flash_far=False):
-        surface, _ = blank()
-        if far is not None:
-            paint(surface, far_arm, rotate=-far, pivot=FAR_SHOULDER)
-        paint(surface, sit if near is None else unarmed)
-        if near is not None:
-            paint(surface, arm, rotate=near, pivot=NEAR_SHOULDER)
-        ctx = context(surface)
-        hat_x, hat_y = HAT if near is None else (HAT[0] + head_x, HAT[1] + head_y)
-        sombrero(ctx, hat_x, hat_y + hat_dy, squash)
-        if flash_near:
-            muzzle_flash(ctx, *rotate_point((MUZZLE[0] - 6, MUZZLE[1]), NEAR_SHOULDER, near), near)
-        if flash_far:
-            far_muzzle = (FAR_SHOULDER[0] + NEAR_SHOULDER[0] - MUZZLE[0] + 6, MUZZLE[1])
-            muzzle_flash(ctx, *rotate_point(far_muzzle, FAR_SHOULDER, -far), 180 - far)
-        return surface
-
-    up = GUNS_UP
-    frames = [(SITTING, 400)]
-    frames += [(pose(hat_dy=dy, squash=squash), ms)
-               for dy, squash, ms in ((-70, 1, 60), (-46, 1, 60), (-20, 1, 60), (1, 0.88, 80), (-1, 1.04, 80), (0, 1, 300))]
-    frames += [(pose(a, a), 70) for a in (-30, 10, 40)]
-    frames.append((pose(up, up), 350))
-    for _ in range(3):
-        frames += [(pose(up + RECOIL, up, flash_near=True), 90), (pose(up, up), 70),
-                   (pose(up, up + RECOIL, flash_far=True), 90), (pose(up, up), 70)]
-    frames += [(pose(up + RECOIL, up + RECOIL, flash_near=True, flash_far=True), 90), (pose(up, up), 70)] * 2
-    frames.append((pose(up, up), 600))
-    frames += [(pose(a, a), 70) for a in (20, -20)]
-    frames += [(pose(hat_dy=dy), ms) for dy, ms in ((0, 400), (-14, 60), (-36, 60), (-70, 60))]
-    frames.append((SITTING, 500))
-    return [("mariachi", "states", frames, ONE_SHOT)]
 
 
 KICK = 37
@@ -335,23 +212,14 @@ OLD_SIGN_BOX = (20, 79, 66, 36)
 SIGN_FLICKER = ((51, 1.0), (51, 0.2), (51, 1.0), (52, 1.0), (53, 1.0), (52, 1.0), (53, 1.0), (51, 0.4), (51, 1.0), (51, 1.0))
 
 
-def rounded(ctx, x, y, w, h, r):
-    ctx.new_sub_path()
-    ctx.arc(x + w - r, y + r, r, -math.pi / 2, 0)
-    ctx.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
-    ctx.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
-    ctx.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
-    ctx.close_path()
-
-
 def neon_sign(ctx, lines, box, lit=1.0):
     x, y, w, h = box
     ctx.save()
-    rounded(ctx, x - 1.5, y - 1.5, w + 3, h + 3, 4.5)
+    rounded_rect(x - 1.5, y - 1.5, w + 3, h + 3, 4.5)(ctx)
     ctx.set_source_rgba(*NEON, 0.35 * lit)
     ctx.set_line_width(3)
     ctx.stroke()
-    rounded(ctx, x, y, w, h, 3.5)
+    rounded_rect(x, y, w, h, 3.5)(ctx)
     ctx.set_source_rgb(*NEON_FILL)
     ctx.fill_preserve()
     ctx.set_source_rgba(*NEON, 0.5 + 0.5 * lit)
@@ -389,4 +257,4 @@ def signs(kit):
 
 
 def animations(kit):
-    return [*mariachi(kit), *fourth_wall(kit), *zen(kit), *disco(kit), *signs(kit)]
+    return [*fourth_wall(kit), *zen(kit), *disco(kit), *signs(kit)]

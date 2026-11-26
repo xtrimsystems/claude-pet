@@ -45,12 +45,6 @@ class Kit:
         return self._cache[index]
 
 
-def rotate_point(point, pivot, degrees):
-    a = math.radians(degrees)
-    x, y = point[0] - pivot[0], point[1] - pivot[1]
-    return pivot[0] + x * math.cos(a) - y * math.sin(a), pivot[1] + x * math.sin(a) + y * math.cos(a)
-
-
 def blank(width=SIZE, height=SIZE):
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
     return surface, cairo.Context(surface)
@@ -118,18 +112,6 @@ def shear(source, lean, base_y=SIZE):
         ctx.paint()
         ctx.restore()
     return surface
-
-
-def drop_specks(surface):
-    data, stride = _pixels(surface)
-    solid = lambda x, y: 0 <= x < SIZE and 0 <= y < SIZE and data[y * stride + x * 4 + 3] >= 160
-    keep = {(x, y) for y in range(SIZE) for x in range(SIZE)
-            if solid(x, y) and sum(solid(x + dx, y + dy) for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))) >= 2}
-    for y in range(SIZE):
-        for x in range(SIZE):
-            if (x, y) not in keep:
-                data[y * stride + x * 4:y * stride + x * 4 + 4] = bytes(4)
-    surface.mark_dirty()
 
 
 def sign_pixels(source, box, min_blue=18):
@@ -252,6 +234,17 @@ def ellipse(cx, cy, rx, ry, angle=0):
         c.scale(rx, ry)
         c.arc(0, 0, 1, 0, 2 * math.pi)
         c.restore()
+    return shape
+
+
+def rounded_rect(x, y, w, h, r):
+    def shape(c):
+        c.new_sub_path()
+        c.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+        c.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+        c.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+        c.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
+        c.close_path()
     return shape
 
 

@@ -67,7 +67,7 @@ SIGN_STATES = ("sign_effort", "sign_nailed")
 EFFORT_SIGN_COOLDOWN_S = 600
 NAILED_IT_CHANCE = 1 / 3
 TRICKS = (("Finger gun", "finger_gun"), ("The fly", "fly_gag"), ("Vibing", "vibing"),
-          ("Head pop", "head_pop"), ("Mariachi", "mariachi"), ("Fourth wall", "fourth_wall"),
+          ("Head pop", "head_pop"), ("Fourth wall", "fourth_wall"),
           ("Zen", "zen"), ("Disco", "disco"), ("Nap", "nap_start"), ("Dozing at the laptop", "laptop_doze"),
           ("Maximum effort sign", "sign_effort"), ("Nailed it sign", "sign_nailed"))
 TRIP_MENU = (("Scooter", "scooter"), ("Unicorn", "unicorn"), ("Balloon", "balloon"), ("Box sneak", "box"))
@@ -108,9 +108,9 @@ class Move(enum.Enum):
 TRIPS = {"scooter": Move.SCOOTER, "unicorn": Move.UNICORN, "balloon": Move.BALLOON, "box": Move.BOX}
 STATE_BEHAVIORS = {"clone_kill": "clone_kill", "error": "error", "finger_gun": "finger_gun",
                    "fly_gag": "fly_gag", "vibing": "vibing", "head_pop": "head_pop", "teleport": "teleport_out",
-                   "mariachi": "mariachi", "fourth_wall": "fourth_wall", "zen": "zen", "disco": "disco"}
+                   "fourth_wall": "fourth_wall", "zen": "zen", "disco": "disco"}
 OPTIONAL_BEHAVIORS = {"scooter", "unicorn", "balloon", "box", "teleport", "finger_gun", "fly_gag", "vibing",
-                      "head_pop", "mariachi", "fourth_wall", "zen", "disco"}
+                      "head_pop", "fourth_wall", "zen", "disco"}
 
 
 class WanderEngine:
@@ -159,10 +159,10 @@ class WanderEngine:
     #   teleport: vanish in smoke, reappear elsewhere on the ground
     CALM_WEIGHTS   = {"sit": 120, "walk": 80, "climb": 20, "kick": 10, "jump": 4, "scooter": 6, "unicorn": 4,
                       "balloon": 3, "box": 3, "teleport": 4, "finger_gun": 4, "fly_gag": 3, "vibing": 4, "head_pop": 3,
-                      "mariachi": 4, "fourth_wall": 3, "zen": 3, "disco": 3, "clone_kill": 3, "error": 3}
+                      "fourth_wall": 3, "zen": 3, "disco": 3, "clone_kill": 3, "error": 3}
     ACTIVE_WEIGHTS = {"sit":  50, "walk": 150, "climb": 40, "kick": 18, "jump": 7, "scooter": 12, "unicorn": 8,
                       "balloon": 5, "box": 5, "teleport": 8, "finger_gun": 6, "fly_gag": 5, "vibing": 6, "head_pop": 5,
-                      "mariachi": 6, "fourth_wall": 5, "zen": 5, "disco": 5, "clone_kill": 5, "error": 5}
+                      "fourth_wall": 5, "zen": 5, "disco": 5, "clone_kill": 5, "error": 5}
     STUMBLE_CHANCE = 0.0003      # per frame while walking (~2% per second)
 
     # Sit durations (frames at 60 fps)

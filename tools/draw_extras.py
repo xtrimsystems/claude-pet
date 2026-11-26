@@ -144,13 +144,47 @@ HEADPHONE_BAND = (0.18, 0.18, 0.20)
 HEADPHONE_CUP = (0.32, 0.32, 0.36)
 HEADPHONE_SHINE = (0.58, 0.58, 0.64)
 NOTE_COLORS = (MINT, (1.0, 0.62, 0.80), GOLD)
+CABLE = (0.30, 0.30, 0.34)
+CABLE_PATH = ((76, 95), (90, 91), (104, 76), (102, 56))
+WALKMAN_ON_BELT = (64, 93)
+WALKMAN_SILVER = (0.80, 0.83, 0.88)
+WALKMAN_BLUE = (0.24, 0.42, 0.78)
+WALKMAN_BUTTON = (1.0, 0.55, 0.15)
+CASSETTE_WINDOW = (0.12, 0.12, 0.14)
+TAPE = (0.50, 0.30, 0.18)
 
 
-def headphones_on(base):
+def walkman(ctx, x, y):
+    filled(ctx, WALKMAN_SILVER, rounded_rect(x, y, 13, 17, 2.2), 2.2)
+    ctx.set_source_rgb(*WALKMAN_BLUE)
+    ctx.rectangle(x + 1.5, y + 10.5, 10, 5)
+    ctx.fill()
+    filled(ctx, CASSETTE_WINDOW, rounded_rect(x + 2.5, y + 3.5, 8, 5, 1), 0.8)
+    ctx.set_source_rgb(*TAPE)
+    ctx.rectangle(x + 3.2, y + 5.2, 6.6, 1.6)
+    ctx.fill()
+    ctx.set_source_rgb(*WALKMAN_BUTTON)
+    for button_x in (x + 1.6, x + 5.6):
+        ctx.rectangle(button_x, y - 1.8, 2.6, 2)
+    ctx.fill()
+
+
+def headphone_cable(ctx):
+    start, bend_low, bend_high, end = CABLE_PATH
+    for width, color in ((2.6, OUTLINE), (1.0, CABLE)):
+        ctx.set_source_rgb(*color)
+        ctx.set_line_width(width)
+        ctx.move_to(*start)
+        ctx.curve_to(*bend_low, *bend_high, *end)
+        ctx.stroke()
+
+
+def listening_gear(base):
     surface, _ = blank()
     filled(context(surface), HEADPHONE_CUP, ellipse(36, 44, 5, 8, -10))
     paint(surface, base)
     ctx = context(surface)
+    headphone_cable(ctx)
     for width, color in ((7, OUTLINE), (3, HEADPHONE_BAND)):
         ctx.set_source_rgb(*color)
         ctx.set_line_width(width)
@@ -162,6 +196,7 @@ def headphones_on(base):
     ctx.set_line_width(1.6)
     ctx.arc(102, 46, 5.5, math.radians(200), math.radians(250))
     ctx.stroke()
+    walkman(ctx, *WALKMAN_ON_BELT)
     return surface
 
 
@@ -174,7 +209,7 @@ def music_notes(ctx, phase):
 
 
 def vibing(kit):
-    dressed = headphones_on(kit.sprite(STANDING))
+    dressed = listening_gear(kit.sprite(STANDING))
     leans = {-1: shear(dressed, -0.06), 0: dressed, 1: shear(dressed, 0.06)}
     bob, _ = blank()
     paint(bob, dressed, dy=1)
