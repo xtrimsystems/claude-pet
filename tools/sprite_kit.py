@@ -57,6 +57,15 @@ def copy(source):
     return surface
 
 
+def mirrored(source, axis_x=SIZE / 2):
+    surface, ctx = blank(source.get_width(), source.get_height())
+    ctx.translate(2 * axis_x, 0)
+    ctx.scale(-1, 1)
+    ctx.set_source_surface(source, 0, 0)
+    ctx.paint()
+    return surface
+
+
 def frame_of(base, draw=None):
     surface = copy(base)
     if draw:

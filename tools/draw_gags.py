@@ -8,9 +8,15 @@ from sprite_kit import *
 
 
 KICK = 37
+STANDING_FEET_X = 68
 IMPACT = (24, 94)
 GLASS = (0.92, 0.97, 1.0)
 WHISTLE = (1.0, 0.62, 0.80)
+LIPS = (88, 66)
+LIP_SHADOW = (0.30, 0.0, 0.0)
+LIP_SHINE = (0.62, 0.12, 0.12)
+MOUTH_HOLE = (0.12, 0.0, 0.0)
+NOTE_EVERY = 5
 
 
 def crack_paths(seed=7):
@@ -76,8 +82,25 @@ def whistle(ctx, phase):
     for k, glyph in enumerate(("♪", "♫")):
         t = (phase + k / 2) % 1.0
         alpha = 1.0 if t < 0.7 else (1 - t) / 0.3
-        outlined_text(ctx, glyph, 28 - 14 * t + 2 * math.sin(t * 8), 62 - 40 * t, 13 + 3 * t,
+        outlined_text(ctx, glyph, 100 + 14 * t - 2 * math.sin(t * 8), 62 - 40 * t, 13 + 3 * t,
                       fill=WHISTLE, width=2.4, alpha=alpha)
+
+
+def puckered_lips(ctx, size):
+    x, y = LIPS
+    ctx.save()
+    ctx.set_operator(cairo.OPERATOR_ATOP)
+    ctx.set_source_rgb(*LIP_SHADOW)
+    ellipse(x, y, 3.2 * size, 2.8 * size)(ctx)
+    ctx.fill()
+    ctx.set_source_rgb(*MOUTH_HOLE)
+    ellipse(x + 0.3, y, 1.4 * size, 1.2 * size)(ctx)
+    ctx.fill()
+    ctx.set_source_rgb(*LIP_SHINE)
+    ctx.set_line_width(1)
+    ctx.arc(x, y, 2.6 * size, 3.6, 5.2)
+    ctx.stroke()
+    ctx.restore()
 
 
 def fourth_wall(kit):
@@ -91,11 +114,14 @@ def fourth_wall(kit):
               (frame_of(kick, crack), 500),
               (frame_of(move_eyes(stand, -3, 3), crack), 500),
               (frame_of(close_eyes(stand, 0.3), crack), 120),
-              (frame_of(stand, crack), 700)]
-    innocent = close_eyes(move_eyes(stand, 2, -3), 0.45)
-    frames += [(frame_of(innocent, lambda c, k=k: (crack(c), whistle(c, k / 10))), 200) for k in range(10)]
+              (frame_of(stand, crack), 450)]
+    back_to_crack = mirrored(stand, STANDING_FEET_X)
+    innocent = close_eyes(move_eyes(back_to_crack, 2, -3), 0.45)
+    frames.append((frame_of(back_to_crack, crack), 300))
+    frames += [(frame_of(innocent, lambda c, k=k: (puckered_lips(c, 1.35 if k % NOTE_EVERY == 0 else 1.2),
+                                                   crack(c), whistle(c, k / 10))), 200) for k in range(10)]
     frames += [(frame_of(innocent, lambda c, a=alpha: crack(c, alpha=a)), 140) for alpha in (0.7, 0.45, 0.2)]
-    frames.append((STANDING, 500))
+    frames += [(back_to_crack, 400), (STANDING, 500)]
     return [("fourth_wall", "states", frames, ONE_SHOT)]
 
 
