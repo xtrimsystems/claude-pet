@@ -12,6 +12,7 @@ MINT = (0.56, 0.87, 0.78)
 MINT_SHINE = (0.80, 0.97, 0.92)
 GOLD = (1.0, 0.82, 0.30)
 SMOKE = (0.94, 0.94, 0.95)
+BELT_ROWS = range(94, 104)
 
 _text_mirrored = False
 
@@ -235,6 +236,36 @@ def eyes_from(source, donor):
     surface = close_eyes(source, 1.0)
     for blob in eye_blobs(donor):
         paint(surface, _eye_layer(donor, blob))
+    return surface
+
+
+def is_confetti(r, g, b, y):
+    suit = r <= 140 and g <= 45 and b <= 45
+    grey = abs(r - g) < 28 and abs(g - b) < 28
+    belt = y in BELT_ROWS and r > g > b >= 16 and r < 120 and g < 90
+    return not (suit or grey or belt)
+
+
+def without_confetti(source):
+    surface = copy(source)
+    surface.flush()
+    data, stride = surface.get_data(), surface.get_stride()
+    original = bytes(data)
+    alpha = lambda x, y: original[y * stride + x * 4 + 3] if 0 <= x < SIZE and 0 <= y < SIZE else 0
+    near = lambda x, y: [(x + dx, y + dy) for dx in range(-2, 3) for dy in range(-2, 3)]
+    confetti = set()
+    for y in range(SIZE):
+        for x in range(SIZE):
+            b, g, r, a = original[y * stride + x * 4:y * stride + x * 4 + 4]
+            if a and is_confetti(r * 255 // a, g * 255 // a, b * 255 // a, y):
+                confetti.add((x, y))
+            elif a and a < 120 and sum(alpha(*p) > 200 for p in near(x, y)) < 4:
+                confetti.add((x, y))
+    for x, y in confetti:
+        body = sum(p not in confetti and alpha(*p) > 200 for p in near(x, y))
+        i = y * stride + x * 4
+        data[i:i + 4] = bytes((0, 0, 108, 255)) if body >= 12 else bytes(4)
+    surface.mark_dirty()
     return surface
 
 

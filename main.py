@@ -200,6 +200,7 @@ def main() -> None:
         sprites_dir=DEFAULT_SPRITES_DIR,
         mascot_path=mascot_path,
         monitor=args.monitor or config.get("monitor"),
+        hat=config.get("hat", "seasonal"),
         on_quit=loop.quit,
     )
 

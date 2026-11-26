@@ -13,6 +13,7 @@ Conforms to the Character protocol expected by PetWindow.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 
@@ -37,6 +38,7 @@ class SpriteCharacter:
         self.move_state: str = ""   # set by PetWindow: walk, sit, climb, fall, ceiling
         self._tick_accum: int = 0
         self._loops_done: int = 0
+        self.gaze: tuple[int, int] = (0, 0)
 
         # Load all sprites
         self._sprites: dict[int, cairo.ImageSurface] = {}
@@ -182,6 +184,12 @@ class SpriteCharacter:
         }
 
         self._right_facing: dict[int, int] = {}
+        self._looks: dict[int, dict] = {}
+        self._heads: dict[int, list] = {}
+        self._hats: dict[str, tuple[cairo.ImageSurface, tuple[int, int], int]] = {}
+        self._fronts: dict[int, cairo.ImageSurface] = {}
+        self._headroom: dict[tuple[str, int], int] = {}
+        self.hat: str | None = None
         self._load_extra_animations(mascot_path)
 
         # Replace missing sprite indices with fallback (first available sprite)
@@ -203,6 +211,23 @@ class SpriteCharacter:
         self._state_config.update(extras.get("states", {}))
         self._move_config.update(extras.get("moves", {}))
         self._right_facing = {int(index): twin for index, twin in extras.get("right_facing", {}).items()}
+        self._looks = {int(pose): look for pose, look in extras.get("looks", {}).items()}
+        self._heads = {int(index): anchor for index, anchor in extras.get("heads", {}).items()}
+        self._fronts = {int(index): cairo.ImageSurface.create_from_png(os.path.join(mascot_path, path))
+                        for index, path in extras.get("fronts", {}).items()
+                        if os.path.isfile(os.path.join(mascot_path, path))}
+        for name, origin in extras.get("hats", {}).items():
+            path = os.path.join(mascot_path, "hats", f"{name}.png")
+            if os.path.isfile(path):
+                image = cairo.ImageSurface.create_from_png(path)
+                self._hats[name] = (image, (origin[0], origin[1]), _top_of(image))
+
+    @property
+    def hats(self) -> list[str]:
+        return sorted(self._hats)
+
+    def set_hat(self, name: str | None) -> None:
+        self.hat = name if name in self._hats else None
 
     def supports(self, animation: str) -> bool:
         return animation in self._state_config or animation in self._move_config
@@ -230,6 +255,16 @@ class SpriteCharacter:
             self.frame = 0
             self._tick_accum = 0
             self._loops_done = 0
+
+    def set_gaze(self, dx: int, dy: int) -> None:
+        self.gaze = (dx, dy)
+
+    def eyes_at(self) -> tuple[float, float] | None:
+        look = self._looks.get(self._pose())
+        if look is None:
+            return None
+        x, y = look["eyes"]
+        return (self._sprites[self._pose()].get_width() - x if self.facing > 0 else x), y
 
     def set_movement(self, move: str, facing: int) -> None:
         """Called by PetWindow each frame with wander state and direction."""
@@ -279,19 +314,45 @@ class SpriteCharacter:
     # Drawing
     # ------------------------------------------------------------------
 
-    def _current_surface(self) -> cairo.ImageSurface | None:
+    def _pose(self) -> int:
         sprites = self._active_config()["sprites"]
-        idx = sprites[self.frame % len(sprites)]
+        return sprites[self.frame % len(sprites)]
+
+    def shown_index(self) -> int:
+        idx = self._pose()
+        look = self._looks.get(idx)
+        if look is not None and self.gaze != (0, 0):
+            dx, dy = self.gaze
+            idx = look["sprites"][(dy + 1) * 3 + (dx * -self.facing) + 1]
         if self.facing > 0:
             idx = self._right_facing.get(idx, idx)
-        return self._sprites.get(idx)
+        return idx
+
+    def headroom(self, idx: int) -> int:
+        anchor = self._heads.get(idx) if self.hat else None
+        if anchor is None:
+            return 0
+        key = (self.hat, idx)
+        if key not in self._headroom:
+            image, (ox, oy), top = self._hats[self.hat]
+            x, y, angle, flip = anchor
+            a = math.radians(angle)
+            corners = [((ox - cx) if flip else (cx - ox), cy - oy)
+                       for cx in (0, image.get_width()) for cy in (top, image.get_height())]
+            highest = min(y + cx * math.sin(a) + cy * math.cos(a) for cx, cy in corners)
+            self._headroom[key] = max(0, math.ceil(-highest))
+        return self._headroom[key]
 
     def overhang(self) -> int:
-        surface = self._current_surface()
-        return surface.get_height() - surface.get_width() if surface else 0
+        idx = self.shown_index()
+        surface = self._sprites.get(idx)
+        return surface.get_height() - surface.get_width() + self.headroom(idx) if surface else 0
 
     def draw(self, ctx: cairo.Context, width: int, height: int) -> None:
-        surface = self._current_surface()
+        self.draw_sprite(ctx, self.shown_index(), self.facing, width, height)
+
+    def draw_sprite(self, ctx: cairo.Context, idx: int, facing: int, width: int, height: int) -> None:
+        surface = self._sprites.get(idx)
         if surface is None:
             return
 
@@ -302,7 +363,7 @@ class SpriteCharacter:
         ctx.translate(0, height - surface.get_height() * scale)
 
         # Flip horizontally when facing right (sprites face left by default)
-        if self.facing > 0:
+        if facing > 0:
             ctx.translate(width, 0)
             ctx.scale(-scale, scale)
         else:
@@ -311,4 +372,39 @@ class SpriteCharacter:
         ctx.set_source_surface(surface, 0, 0)
         ctx.get_source().set_filter(cairo.FILTER_NEAREST)
         ctx.paint()
+        if self.hat:
+            self._paint_hat(ctx, idx)
+            self._paint_front(ctx, idx)
         ctx.restore()
+
+    def _paint_front(self, ctx: cairo.Context, idx: int) -> None:
+        front = self._fronts.get(idx)
+        if front is not None:
+            ctx.set_source_surface(front, 0, 0)
+            ctx.get_source().set_filter(cairo.FILTER_NEAREST)
+            ctx.paint()
+
+    def _paint_hat(self, ctx: cairo.Context, idx: int) -> None:
+        anchor = self._heads.get(idx)
+        if anchor is None:
+            return
+        image, (ox, oy), _ = self._hats[self.hat]
+        x, y, angle, flip = anchor
+        ctx.save()
+        ctx.translate(x, y)
+        ctx.rotate(math.radians(angle))
+        if flip:
+            ctx.scale(-1, 1)
+        ctx.set_source_surface(image, -ox, -oy)
+        ctx.get_source().set_filter(cairo.FILTER_GOOD if angle else cairo.FILTER_NEAREST)
+        ctx.paint()
+        ctx.restore()
+
+
+def _top_of(image: cairo.ImageSurface) -> int:
+    image.flush()
+    data, stride = image.get_data(), image.get_stride()
+    for y in range(image.get_height()):
+        if any(data[y * stride + x * 4 + 3] for x in range(image.get_width())):
+            return y
+    return 0

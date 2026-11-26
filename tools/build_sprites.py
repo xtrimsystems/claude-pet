@@ -9,12 +9,14 @@ import cairo
 import draw_extras
 import draw_finger_gun
 import draw_gags
+import draw_hats
 import draw_scooter
 import draw_travel
 from sprite_kit import Kit, copy, erase, mirror_text, sign_pixels
 
 FIRST_GENERATED = 54
 MIN_PNG_BYTES = 500
+FRONT_DIR = "front"
 SPRITE_NAME = re.compile(r"shime(\d+)\.png$")
 QUESTION_BOX = (10, 8, 22, 38)
 HEY_BOX = (25, 93, 55, 19)
@@ -82,6 +84,42 @@ def write_manifest(path, manifest):
         f.write("{\n" + ",\n".join(sections) + "\n}\n")
 
 
+def head_anchors(kit, finder, originals, animations):
+    heads = {}
+    for index in originals:
+        anchor, _ = finder.anchor(kit.sprite(index))
+        if finder.usable(kit.sprite(index), anchor):
+            heads[index] = anchor
+    for frames, indices in animations:
+        surfaces = [kit.sprite(frame) if isinstance(frame, int) else frame for frame in frames]
+        for index, anchor in zip(indices, draw_hats.head_anchors(finder, surfaces)):
+            if anchor and index not in heads:
+                heads[index] = anchor
+    return heads
+
+
+def write_hats(mascot_dir, hats):
+    hat_dir = os.path.join(mascot_dir, "hats")
+    os.makedirs(hat_dir, exist_ok=True)
+    for name in os.listdir(hat_dir):
+        if name.endswith(".png") and name[:-4] not in hats:
+            os.remove(os.path.join(hat_dir, name))
+    for name, image in hats.items():
+        image.write_to_png(os.path.join(hat_dir, f"{name}.png"))
+
+
+def write_fronts(mascot_dir, fronts):
+    front_dir = os.path.join(mascot_dir, FRONT_DIR)
+    os.makedirs(front_dir, exist_ok=True)
+    files = {index: f"{FRONT_DIR}/shime{index}.png" for index in fronts}
+    for name in os.listdir(front_dir):
+        if f"{FRONT_DIR}/{name}" not in files.values():
+            os.remove(os.path.join(front_dir, name))
+    for index, surface in fronts.items():
+        surface.write_to_png(os.path.join(mascot_dir, files[index]))
+    return files
+
+
 def main(mascot_dir):
     img_dir = os.path.join(mascot_dir, "img")
     kit = Kit(img_dir)
@@ -98,17 +136,44 @@ def main(mascot_dir):
         return index_of[key]
 
     twins = pack_text_twins(kit)
+    played = []
+    fronts = {}
     for (name, kind, frames, options), (_, _, mirrored, _) in zip(all_animations(kit), all_animations(kit, True)):
         sprites = []
-        for (frame, _), (twin, _) in zip(frames, mirrored):
+        for (frame, _, *front), (twin, *_) in zip(frames, mirrored):
             if not isinstance(frame, int):
                 has_text = fingerprint(twin) != fingerprint(frame)
                 frame = index_for(frame)
                 if has_text:
                     twins.append((frame, twin))
+            if front:
+                fronts[frame] = front[0]
             sprites.append(frame)
-        manifest[kind][name] = {"sprites": sprites, "durations": [ms for _, ms in frames], **options}
+        manifest[kind][name] = {"sprites": sprites, "durations": [entry[1] for entry in frames], **options}
+        played.append(([entry[0] for entry in frames], sprites))
+    manifest["looks"] = {str(pose): {"eyes": look["eyes"],
+                                     "sprites": [frame if isinstance(frame, int) else index_for(frame)
+                                                 for frame in look["frames"]]}
+                         for pose, look in draw_extras.looks(kit).items()}
     manifest["right_facing"] = {str(index): index_for(twin) for index, twin in sorted(twins, key=lambda t: t[0])}
+
+    hats = draw_hats.hats()
+    heads = head_anchors(kit, draw_hats.HeadFinder(kit, hats.values()), originals, played)
+    for twin_of, twin in manifest["right_facing"].items():
+        if int(twin_of) in heads:
+            heads[twin] = heads[int(twin_of)]
+    for pose, look in manifest["looks"].items():
+        for index in look["sprites"]:
+            if int(pose) in heads:
+                heads[index] = heads[int(pose)]
+    manifest["hats"] = {name: list(draw_hats.HAT_ORIGIN) for name in hats}
+    manifest["heads"] = {str(index): heads[index] for index in sorted(heads)}
+    write_hats(mascot_dir, hats)
+    front_files = write_fronts(mascot_dir, fronts)
+    for twin_of, twin in manifest["right_facing"].items():
+        if int(twin_of) in front_files:
+            front_files[twin] = front_files[int(twin_of)]
+    manifest["fronts"] = {str(index): front_files[index] for index in sorted(front_files)}
 
     for index, surface in generated.items():
         surface.write_to_png(kit.path(index))
@@ -121,7 +186,8 @@ def main(mascot_dir):
     write_manifest(os.path.join(mascot_dir, "animations.json"), manifest)
     last = FIRST_GENERATED + len(generated) - 1
     print(f"{len(manifest['states'])} states, {len(manifest['moves'])} moves, "
-          f"{len(manifest['right_facing'])} right-facing text frames, sprites {FIRST_GENERATED}-{last}")
+          f"{len(manifest['right_facing'])} right-facing text frames, {len(heads)} frames with a head for hats, "
+          f"sprites {FIRST_GENERATED}-{last}")
 
 
 if __name__ == "__main__":

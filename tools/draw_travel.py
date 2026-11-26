@@ -24,6 +24,7 @@ STRING_LENGTH = HOOK_TIE[1] - (BALLOON_CENTER[1] + BALLOON_RY + KNOT_LENGTH)
 FAR_BEHIND_HIM = ((100, 150, 0.35), (105, 124, 0.48), (104, 98, 0.62), (99, 74, 0.76), (93, 57, 0.88))
 SWEAT = (0.62, 0.85, 1.0)
 SWEAT_ON_BROW = (39, BALLOON_OVERHANG + 30)
+TREMBLE = ((0, 0), (1, 0), (0, 1), (-1, 0), (1, 1), (0, 0), (-1, 1), (1, -1))
 
 
 def tall(overhang):
@@ -127,11 +128,6 @@ def lifted(base, center=BALLOON_CENTER, sway=0, slack=0.0, behind=None, extra=No
 
 def popped(base, flash=True, extra=None):
     surface, ctx = tall(BALLOON_OVERHANG)
-    ctx.set_source_rgb(*STRING)
-    ctx.set_line_width(1.3)
-    ctx.move_to(*HOOK_TIE)
-    ctx.curve_to(100, BALLOON_OVERHANG + 76, 112, BALLOON_OVERHANG + 66, 106, BALLOON_OVERHANG + 54)
-    ctx.stroke()
     if flash:
         burst(ctx, *BALLOON_CENTER, 18, 40, range(0, 360, 24), GOLD, 3)
         for k in range(7):
@@ -139,7 +135,6 @@ def popped(base, flash=True, extra=None):
             filled(ctx, BALLOON_BLUE, ellipse(BALLOON_CENTER[0] + 30 * math.cos(a), BALLOON_CENTER[1] + 30 * math.sin(a),
                                              4.5, 2.4, k * 40), 1.2)
         outlined_text(ctx, "POP!", BALLOON_CENTER[0] - 22, BALLOON_CENTER[1] + 7, 18, fill=GOLD, width=3)
-    hook(ctx, *HOOKED_AT)
     paint(surface, base, dy=BALLOON_OVERHANG)
     if extra:
         extra(context(surface))
@@ -158,12 +153,13 @@ def balloon(kit):
     alarm = lambda c: exclamation(c, 30, BALLOON_OVERHANG + 4)
     sweating = lambda c: sweat_drop(c, *SWEAT_ON_BROW)
     shocked = resize_eyes(stand, 0.45)
-    looking_down_scared = resize_eyes(eyes_from(dangle, stand), 0.5, -1, 3)
+    round_eyed = eyes_from(dangle, stand)
+    looking_down_scared = lambda dx=0, dy=0: resize_eyes(round_eyed, 0.5, dx - 1, dy + 3)
     grab += [(lifted(look_back, slack=0.8, behind=clink), 120),
              (lifted(shocked, slack=0.6, extra=alarm), 400),
-             (lifted(looking_down_scared, slack=0.0, extra=sweating), 200)]
-    rising = [(lifted(looking_down_scared, sway=sway, extra=sweating), 90)
-              for sway in (0, 1, 2, 1, 0, -1, -2, -1) * 2]
+             (lifted(looking_down_scared(), slack=0.0, extra=sweating), 200)]
+    rising = [(lifted(looking_down_scared(*TREMBLE[k % len(TREMBLE)]), sway=sway, extra=sweating), 90)
+              for k, sway in enumerate((0, 1, 2, 1, 0, -1, -2, -1) * 2)]
     look_up = move_eyes(dangle, 2, -3)
     pop = [(popped(dangle), 110),
            (popped(look_up, False, lambda c: exclamation(c, 26, BALLOON_OVERHANG + 2)), 350)]
@@ -184,7 +180,6 @@ RISEN = 6
 SLIT = (46, 57, 44, 16)
 EYE_AREA = (38, 38, 50, 22)
 EYES_IN_SLIT = (6, 17)
-BELT_ROWS = range(94, 104)
 
 
 def cardboard_box(ctx, dy):
@@ -268,36 +263,6 @@ def boxed(body, box_dy, eyes=None, puffs=0.0, overhang=0):
         cloud(ctx, x, 124, 5 + 3 * puffs, 1 + 0.4 * puffs)
         ctx.pop_group_to_source()
         ctx.paint_with_alpha(1 - puffs * 0.6)
-    return surface
-
-
-def is_confetti(r, g, b, y):
-    suit = r <= 140 and g <= 45 and b <= 45
-    grey = abs(r - g) < 28 and abs(g - b) < 28
-    belt = y in BELT_ROWS and r > g > b >= 16 and r < 120 and g < 90
-    return not (suit or grey or belt)
-
-
-def without_confetti(source):
-    surface = copy(source)
-    surface.flush()
-    data, stride = surface.get_data(), surface.get_stride()
-    original = bytes(data)
-    alpha = lambda x, y: original[y * stride + x * 4 + 3] if 0 <= x < SIZE and 0 <= y < SIZE else 0
-    near = lambda x, y: [(x + dx, y + dy) for dx in range(-2, 3) for dy in range(-2, 3)]
-    confetti = set()
-    for y in range(SIZE):
-        for x in range(SIZE):
-            b, g, r, a = original[y * stride + x * 4:y * stride + x * 4 + 4]
-            if a and is_confetti(r * 255 // a, g * 255 // a, b * 255 // a, y):
-                confetti.add((x, y))
-            elif a and a < 120 and sum(alpha(*p) > 200 for p in near(x, y)) < 4:
-                confetti.add((x, y))
-    for x, y in confetti:
-        body = sum(p not in confetti and alpha(*p) > 200 for p in near(x, y))
-        i = y * stride + x * 4
-        data[i:i + 4] = bytes((0, 0, 108, 255)) if body >= 12 else bytes(4)
-    surface.mark_dirty()
     return surface
 
 

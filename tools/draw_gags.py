@@ -17,6 +17,18 @@ LIP_SHADOW = (0.30, 0.0, 0.0)
 LIP_SHINE = (0.62, 0.12, 0.12)
 MOUTH_HOLE = (0.12, 0.0, 0.0)
 NOTE_EVERY = 5
+HANDS_AT_CHEEKS = 50
+TORTILLA = (0.91, 0.64, 0.27)
+CRISP = (0.74, 0.45, 0.15)
+TORTILLA_SHINE = (1.0, 0.85, 0.52)
+FILLING = (0.66, 0.30, 0.13)
+CHEESE = (1.0, 0.84, 0.28)
+SALSA = (0.85, 0.16, 0.10)
+CHIMI_LENGTH, CHIMI_THICK, BITE = 38, 12, 7
+CHIMI_HELD = (86, 59)
+CHIMI_TILT = -14
+CHIMI_ON_BELT = (56, 86)
+MOUTH = (50, 66)
 
 
 def crack_paths(seed=7):
@@ -282,5 +294,107 @@ def signs(kit):
             ("sign_nailed", "states", holding(("NAILED", "IT!"), (19, 81, 70, 34)), ONE_SHOT)]
 
 
+def chimichanga(ctx, right_x, right_y, length=CHIMI_LENGTH, angle=CHIMI_TILT, bitten=False):
+    r = CHIMI_THICK / 2
+    left = -length
+    tip = left if bitten else left + r
+
+    def body(c):
+        c.new_sub_path()
+        c.move_to(tip, -r)
+        c.curve_to(left + length * 0.4, -r - 1.2, -length * 0.4, -r - 1.2, -r, -r)
+        c.arc(-r, 0, r, -math.pi / 2, math.pi / 2)
+        c.curve_to(-length * 0.4, r + 1.2, left + length * 0.4, r + 1.2, tip, r)
+        if bitten:
+            c.arc_negative(left, r / 2, r / 2, math.pi / 2, -math.pi / 2)
+            c.arc_negative(left + 0.5, -r / 2, r / 2 - 0.3, math.pi / 2, -math.pi / 2)
+        else:
+            c.arc(left + r, 0, r, math.pi / 2, 3 * math.pi / 2)
+        c.close_path()
+
+    ctx.save()
+    ctx.translate(right_x, right_y)
+    ctx.rotate(math.radians(angle))
+    ctx.save()
+    body(ctx)
+    ctx.clip()
+    ctx.set_source_rgb(*TORTILLA)
+    ctx.paint()
+    ctx.set_source_rgb(*CRISP)
+    for x, y, rx in ((0.25, 2.2, 1.6), (0.45, -1.0, 1.2), (0.62, 2.6, 1.4), (0.8, 0.2, 1.1), (0.33, -3.3, 1.0)):
+        ellipse(-length * x, y, rx, rx * 0.6)(ctx)
+        ctx.fill()
+    ctx.set_source_rgb(*TORTILLA_SHINE)
+    ctx.set_line_width(1.6)
+    ctx.move_to(left + 4, -r + 2)
+    ctx.line_to(-r - 1, -r + 2)
+    ctx.stroke()
+    ctx.set_source_rgb(*CRISP)
+    ctx.set_line_width(1.3)
+    for x in (-r - 3, -r + 0.5):
+        ctx.move_to(x, -r)
+        ctx.curve_to(x - 2.5, -1, x - 2.5, 1, x, r)
+        ctx.stroke()
+    if bitten:
+        ctx.set_source_rgb(*FILLING)
+        ctx.rectangle(left - 1, -r, r / 2 + 4.5, CHIMI_THICK)
+        ctx.fill()
+        for color, x, y, size in ((CHEESE, 2.6, -2.8, 1.3), (CHEESE, 3.4, 1.0, 1.2), (SALSA, 1.6, -0.6, 1.0),
+                                  (CHEESE, 2.0, 3.6, 1.0)):
+            ctx.set_source_rgb(*color)
+            circle(left + x + 1, y, size)(ctx)
+            ctx.fill()
+    ctx.restore()
+    body(ctx)
+    ctx.set_source_rgb(*OUTLINE)
+    ctx.set_line_width(2)
+    ctx.stroke()
+    ctx.restore()
+
+
+def crumbs(ctx, cx, cy, spread, seed):
+    rnd = random.Random(seed)
+    for _ in range(6):
+        a = rnd.uniform(math.pi * 0.9, math.pi * 2.1)
+        d = rnd.uniform(4, spread)
+        filled(ctx, rnd.choice((TORTILLA, CRISP)), circle(cx + d * math.cos(a), cy + d * math.sin(a),
+                                                         rnd.uniform(0.9, 1.6)), 0.8)
+
+
+def chimichanga_snack(kit):
+    stand = kit.sprite(STANDING)
+    cheeks = without_confetti(kit.sprite(HANDS_AT_CHEEKS))
+
+    def munching(bites, draw=None, bounce=0):
+        surface = copy(cheeks)
+        if bites <= 3:
+            chimichanga(context(surface), CHIMI_HELD[0], CHIMI_HELD[1] + bounce, CHIMI_LENGTH - BITE * bites,
+                        bitten=bites > 0)
+        return frame_of(surface, draw)
+
+    def treasure(ctx, size):
+        burst(ctx, *CHIMI_ON_BELT, 8 + 6 * size, 14 + 8 * size, range(0, 360, 30), GOLD, 2)
+        chimichanga(ctx, CHIMI_ON_BELT[0] + 19 * size, CHIMI_ON_BELT[1] - 7 * size, CHIMI_LENGTH * size, -20)
+        sparkle(ctx, 22, 80, 3 + 2 * size)
+        sparkle(ctx, 54, 104, 2 + 2 * size)
+
+    frames = [(STANDING, 300),
+              (frame_of(move_eyes(stand, -2, 3), lambda c: treasure(c, 0.6)), 250),
+              (frame_of(move_eyes(stand, -2, 2), lambda c: (treasure(c, 1.0), exclamation(c, 26, 16))), 450),
+              (munching(0), 350)]
+    for bite in range(1, 4):
+        at = (MOUTH[0] + 4 * bite, MOUTH[1])
+        frames += [(munching(bite, lambda c, b=bite, at=at: (outlined_text(c, "NOM!", 2 + 4 * b, 36 - 3 * b, 11),
+                                                              crumbs(c, *at, 14, b))), 220),
+                   (munching(bite, lambda c, b=bite, at=at: crumbs(c, at[0], at[1] + 10, 10, b + 10), 1), 180),
+                   (munching(bite, lambda c, b=bite, at=at: crumbs(c, at[0], at[1] + 18, 8, b + 20)), 180)]
+    content = close_eyes(stand, 0.6)
+    frames += [(munching(4, lambda c: (outlined_text(c, "GULP!", 4, 30, 11), crumbs(c, MOUTH[0] + 8, MOUTH[1] + 14, 12, 40))), 350),
+               (frame_of(content, lambda c: outlined_text(c, "BURP!", 2, 30, 12)), 700),
+               (content, 400),
+               (STANDING, 300)]
+    return [("chimichanga", "states", frames, ONE_SHOT)]
+
+
 def animations(kit):
-    return [*fourth_wall(kit), *zen(kit), *disco(kit), *signs(kit)]
+    return [*fourth_wall(kit), *zen(kit), *disco(kit), *chimichanga_snack(kit), *signs(kit)]

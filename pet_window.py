@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import enum
 import logging
+import math
 import os
 import random
+import socket
 import time
 from typing import Protocol
 
@@ -40,6 +42,8 @@ class CharacterProto(Protocol):
     def tick(self) -> None: ...
     def set_state(self, state: str) -> None: ...
     def set_movement(self, move: str, facing: int) -> None: ...
+    def set_gaze(self, dx: int, dy: int) -> None: ...
+    def eyes_at(self) -> tuple[float, float] | None: ...
     def supports(self, animation: str) -> bool: ...
     def animation_ms(self, state: str) -> int: ...
     def overhang(self) -> int: ...
@@ -66,9 +70,19 @@ DOZE_COOLDOWN_S = 300
 SIGN_STATES = ("sign_effort", "sign_nailed")
 EFFORT_SIGN_COOLDOWN_S = 600
 NAILED_IT_CHANCE = 1 / 3
+GAZE_POLL_S = 0.15
+GAZE_RESET_S = 4
+GAZE_DEAD_ZONE = 0.3
+GAZE_DIAGONAL = 0.38
+LOOKING_MOVES = ("", "sit")
+HAT_SEASONAL = "seasonal"
+HAT_NONE = "none"
+HAT_SEASONS = {10: "pumpkin", 12: "santa"}
+HAT_CHECK_S = 3600
 TRICKS = (("Finger gun", "finger_gun"), ("The fly", "fly_gag"), ("Vibing", "vibing"),
           ("Head pop", "head_pop"), ("Fourth wall", "fourth_wall"),
-          ("Zen", "zen"), ("Disco", "disco"), ("Nap", "nap_start"), ("Dozing at the laptop", "laptop_doze"),
+          ("Zen", "zen"), ("Disco", "disco"), ("Chimichanga", "chimichanga"),
+          ("Nap", "nap_start"), ("Dozing at the laptop", "laptop_doze"),
           ("Maximum effort sign", "sign_effort"), ("Nailed it sign", "sign_nailed"))
 TRIP_MENU = (("Scooter", "scooter"), ("Unicorn", "unicorn"), ("Balloon", "balloon"), ("Box sneak", "box"))
 
@@ -108,9 +122,10 @@ class Move(enum.Enum):
 TRIPS = {"scooter": Move.SCOOTER, "unicorn": Move.UNICORN, "balloon": Move.BALLOON, "box": Move.BOX}
 STATE_BEHAVIORS = {"clone_kill": "clone_kill", "error": "error", "finger_gun": "finger_gun",
                    "fly_gag": "fly_gag", "vibing": "vibing", "head_pop": "head_pop", "teleport": "teleport_out",
-                   "fourth_wall": "fourth_wall", "zen": "zen", "disco": "disco"}
+                   "fourth_wall": "fourth_wall", "zen": "zen", "disco": "disco",
+                   "chimichanga": "chimichanga"}
 OPTIONAL_BEHAVIORS = {"scooter", "unicorn", "balloon", "box", "teleport", "finger_gun", "fly_gag", "vibing",
-                      "head_pop", "fourth_wall", "zen", "disco"}
+                      "head_pop", "fourth_wall", "zen", "disco", "chimichanga"}
 
 
 class WanderEngine:
@@ -159,10 +174,10 @@ class WanderEngine:
     #   teleport: vanish in smoke, reappear elsewhere on the ground
     CALM_WEIGHTS   = {"sit": 120, "walk": 80, "climb": 20, "kick": 10, "jump": 4, "scooter": 6, "unicorn": 4,
                       "balloon": 3, "box": 3, "teleport": 4, "finger_gun": 4, "fly_gag": 3, "vibing": 4, "head_pop": 3,
-                      "fourth_wall": 3, "zen": 3, "disco": 3, "clone_kill": 3, "error": 3}
+                      "fourth_wall": 3, "zen": 3, "disco": 3, "chimichanga": 3, "clone_kill": 3, "error": 3}
     ACTIVE_WEIGHTS = {"sit":  50, "walk": 150, "climb": 40, "kick": 18, "jump": 7, "scooter": 12, "unicorn": 8,
                       "balloon": 5, "box": 5, "teleport": 8, "finger_gun": 6, "fly_gag": 5, "vibing": 6, "head_pop": 5,
-                      "fourth_wall": 5, "zen": 5, "disco": 5, "clone_kill": 5, "error": 5}
+                      "fourth_wall": 5, "zen": 5, "disco": 5, "chimichanga": 5, "clone_kill": 5, "error": 5}
     STUMBLE_CHANCE = 0.0003      # per frame while walking (~2% per second)
 
     # Sit durations (frames at 60 fps)
@@ -793,6 +808,33 @@ class MonitorOverlay(Gtk.Window):
 # Pet controller
 # ======================================================================
 
+class HyprlandCursor:
+    """Asks Hyprland where the pointer is, which a Wayland client can't see outside its own input region."""
+
+    def __init__(self) -> None:
+        runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+        signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+        path = os.path.join(runtime, "hypr", signature, ".socket.sock")
+        self._socket_path = path if runtime and signature and os.path.exists(path) else None
+
+    def position(self) -> tuple[float, float] | None:
+        if self._socket_path is None:
+            return None
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+                conn.settimeout(0.05)
+                conn.connect(self._socket_path)
+                conn.sendall(b"cursorpos")
+                x, y = conn.recv(64).decode().split(",")
+            return float(x), float(y)
+        except (OSError, ValueError):
+            return None
+
+
+def _gaze_step(component: float) -> int:
+    return 1 if component > GAZE_DIAGONAL else -1 if component < -GAZE_DIAGONAL else 0
+
+
 class Pet:
     """Drives the sprite across all monitors and reacts to Claude Code state."""
 
@@ -805,9 +847,11 @@ class Pet:
         sprites_dir: str | None = None,
         mascot_path: str | None = None,
         monitor: str | None = None,
+        hat: str = HAT_SEASONAL,
         on_quit=None,
     ) -> None:
         self.character = character
+        self._hat_choice = hat
         self._preferred_monitor = monitor
         self.bridge = bridge
         self._size = size
@@ -849,6 +893,10 @@ class Pet:
         self._last_doze = -DOZE_COOLDOWN_S
         self._last_effort_sign = -EFFORT_SIGN_COOLDOWN_S
         self._shown_overhang = 0
+        self._cursor = HyprlandCursor()
+        self._next_gaze_poll = 0.0
+        self._last_cursor: tuple[float, float] | None = None
+        self._cursor_moved_at = 0.0
 
         self._overlays: list[MonitorOverlay] = []
         self._display = Gdk.Display.get_default()
@@ -858,6 +906,8 @@ class Pet:
         self._monitors_model = self._display.get_monitors()
         self._monitors_model.connect("items-changed", self._on_monitors_changed)
         self._init_wander()
+        self._apply_hat()
+        self._hat_timer_id = GLib.timeout_add_seconds(HAT_CHECK_S, self._on_hat_clock)
         self._start_timers()
         self._start_bridge()
 
@@ -1006,7 +1056,48 @@ class Pet:
 
     def _visual_key(self) -> tuple:
         c = self.character
-        return (c.state, c.frame, c.move_state, c.facing)
+        return (c.state, c.frame, c.move_state, c.facing, c.gaze, c.hat)
+
+    def _apply_hat(self) -> None:
+        if self._hat_choice == HAT_SEASONAL:
+            name = HAT_SEASONS.get(time.localtime().tm_mon)
+        else:
+            name = None if self._hat_choice == HAT_NONE else self._hat_choice
+        self.character.set_hat(name)
+
+    def _on_hat_clock(self) -> bool:
+        self._apply_hat()
+        return True
+
+    def _can_look(self) -> bool:
+        c = self.character
+        return (not self._drag_active and self._clone is None and self._wander is not None
+                and c.state == "idle" and c.move_state in LOOKING_MOVES)
+
+    def _follow_cursor(self) -> None:
+        eyes = self.character.eyes_at() if self._can_look() else None
+        if eyes is None:
+            self.character.set_gaze(0, 0)
+            return
+        now = time.monotonic()
+        if now < self._next_gaze_poll:
+            return
+        self._next_gaze_poll = now + GAZE_POLL_S
+        cursor = self._cursor.position()
+        if cursor != self._last_cursor:
+            self._last_cursor = cursor
+            self._cursor_moved_at = now
+        if cursor is None or now - self._cursor_moved_at > GAZE_RESET_S:
+            self.character.set_gaze(0, 0)
+            return
+        x, y = self._sprite_pos()
+        scale = self._size / SPRITE_BASE
+        vx, vy = cursor[0] - (x + eyes[0] * scale), cursor[1] - (y + eyes[1] * scale)
+        distance = math.hypot(vx, vy)
+        if distance < self._size * GAZE_DEAD_ZONE:
+            self.character.set_gaze(0, 0)
+        else:
+            self.character.set_gaze(_gaze_step(vx / distance), _gaze_step(vy / distance))
 
     def _on_frame_tick(self) -> bool:
         prev_state = self.character.state
@@ -1110,6 +1201,7 @@ class Pet:
                 facing = self._wander.direction
             self.character.set_movement(move_name, facing)
 
+        self._follow_cursor()
         if moved or self._drag_active or self.character.overhang() != self._shown_overhang:
             self._render()
         elif self._visual_key() != prev_visual:
@@ -1144,8 +1236,10 @@ class Pet:
             overlay.sprite.set_size(self._size, self._size + overhang)
             overlay.place(overlay.sprite, x, y - overhang)
             if self._clone is not None:
+                room = round(self._clone["headroom"] * self._size / SPRITE_BASE)
                 overlay.clone.set_painter(self._draw_clone)
-                overlay.place(overlay.clone, self._clone["x"], self._clone["y"])
+                overlay.clone.set_size(self._size, self._size + room)
+                overlay.place(overlay.clone, self._clone["x"], self._clone["y"] - room)
             else:
                 overlay.park(overlay.clone)
             overlay.update_input_region()
@@ -1159,21 +1253,7 @@ class Pet:
         if clone is None:
             return
         idx = clone["indices"][clone["frame"] % len(clone["indices"])]
-        surface = self.character._sprites.get(idx)
-        if surface is None:
-            return
-        sx = width / surface.get_width()
-        sy = height / surface.get_height()
-        ctx.save()
-        if clone["facing"] > 0:
-            ctx.translate(width, 0)
-            ctx.scale(-sx, sy)
-        else:
-            ctx.scale(sx, sy)
-        ctx.set_source_surface(surface, 0, 0)
-        ctx.get_source().set_filter(cairo.FILTER_NEAREST)
-        ctx.paint()
-        ctx.restore()
+        self.character.draw_sprite(ctx, idx, clone["facing"], width, height)
 
     # ------------------------------------------------------------------
     # Bridge
@@ -1344,6 +1424,10 @@ class Pet:
         mascot.connect("change-state", self._on_menu_mascot)
         group.add_action(mascot)
 
+        hat = Gio.SimpleAction.new_stateful("hat", GLib.VariantType.new("s"), GLib.Variant.new_string(self._hat_choice))
+        hat.connect("change-state", self._on_menu_hat)
+        group.add_action(hat)
+
         for name, handler in (("kick", self._on_menu_kick), ("jump", self._on_menu_jump),
                               ("clone-kill", self._on_menu_clone_kill), ("quit", self._on_menu_quit)):
             action = Gio.SimpleAction.new(name, None)
@@ -1376,6 +1460,12 @@ class Pet:
                 item.set_action_and_target_value("pet.mascot", GLib.Variant.new_string(path))
                 mascot_sub.append_item(item)
             section.append_submenu("Mascot", mascot_sub)
+        if self.character.hats:
+            hat_sub = Gio.Menu()
+            for label, choice in (("Seasonal", HAT_SEASONAL), ("None", HAT_NONE),
+                                  *((name.capitalize(), name) for name in self.character.hats)):
+                hat_sub.append_item(self._menu_item(label, "pet.hat", choice))
+            section.append_submenu("Hat", hat_sub)
         menu.append_section(None, section)
 
         section = Gio.Menu()
@@ -1460,8 +1550,9 @@ class Pet:
         facing = self._wander.direction if self._wander else -1
         clone_x = x - facing * (self._size // 2)  # behind = opposite of facing
         # Attack animation: stand, jump, kick, kick, stand victorious
-        self._clone = {"x": clone_x, "y": y, "facing": facing,
-                       "indices": [27, 28, 29], "frame": 0}
+        indices = [27, 28, 29]
+        self._clone = {"x": clone_x, "y": y, "facing": facing, "indices": indices, "frame": 0,
+                       "headroom": max(self.character.headroom(index) for index in indices)}
         self._clone_timer_id = GLib.timeout_add(300, self._on_clone_tick)
         self._render()
         logger.debug("Clone spawned at (%d, %d)", clone_x, y)
@@ -1547,17 +1638,27 @@ class Pet:
         action.set_state(value)
         self._mascot_path = path
         self.character = new_char
+        self._apply_hat()
         self._sync_extras()
         self._render()
         logger.info("Switched mascot to %s (%d sprites)", path, len(new_char._sprites))
-        # Persist selection as default
+        self._save_setting("mascot", os.path.basename(path))
+
+    def _on_menu_hat(self, action, value) -> None:
+        action.set_state(value)
+        self._hat_choice = value.get_string()
+        self._apply_hat()
+        self._save_setting("hat", self._hat_choice)
+
+    @staticmethod
+    def _save_setting(key: str, value: str) -> None:
         try:
             from main import load_config, save_config
             cfg = load_config()
-            cfg["mascot"] = os.path.basename(path)
+            cfg[key] = value
             save_config(cfg)
         except Exception:
-            pass
+            logger.exception("Could not save %s to the config", key)
 
     def _on_menu_set_state(self, action, value) -> None:
         state = value.get_string()
@@ -1596,7 +1697,7 @@ class Pet:
 
     def shutdown(self) -> None:
         self._stop_timers()
-        for timer in (self._menu_timeout_id, self._clone_timer_id):
+        for timer in (self._menu_timeout_id, self._clone_timer_id, self._hat_timer_id):
             if timer is not None:
                 GLib.source_remove(timer)
         self._menu_timeout_id = None

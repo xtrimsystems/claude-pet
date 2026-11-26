@@ -12,6 +12,9 @@ TYPING = (47, 48)
 SITTING_NECK = 92
 STANDING_NECK = 74
 ONE_SHOT = {"loop": False, "loops": 1, "next": "idle"}
+LOOK_X = {-1: -3, 0: 0, 1: 3}
+LOOK_Y = {-1: -3, 0: 0, 1: 2}
+LOOK_DIRECTIONS = tuple((dx, dy) for dy in (-1, 0, 1) for dx in (-1, 0, 1))
 
 
 def head_nod(base, neck_y, drop):
@@ -114,8 +117,11 @@ def fly_gag(kit):
         paint(surface, crop_rects(sit, finger_gun.EYE_PATCHES), dx=-shift_x, dy=-shift_y)
         return surface
 
+    def with_fly(base, fly, ms, extra=None):
+        return frame_of(base, lambda c: (fly(c), extra and extra(c))), ms, frame_of(blank()[0], fly)
+
     def buzz(base, ref, positions, ms, first_flap=0):
-        return [(frame_of(gaze(base, p, ref), lambda c, p=p, k=k: fly_sprite(c, *p, (k + first_flap) % 2)), ms)
+        return [with_fly(gaze(base, p, ref), lambda c, p=p, k=k: fly_sprite(c, *p, (k + first_flap) % 2), ms)
                 for k, p in enumerate(positions)]
 
     eye_ref = (70, 66)
@@ -129,12 +135,13 @@ def fly_gag(kit):
     for k, (name, ms) in enumerate((("draw_low", 80), ("draw_mid", 70), ("aimed", 500), ("flag_peek", 60), ("flag_half", 60))):
         frames += buzz(open_eyes(gun[name]), gun_eye_ref, [(hover[0], hover[1] - k % 2)], ms, k)
     popped = gaze(open_eyes(gun["flag_pop"]), (14, 60), gun_eye_ref)
-    frames.append((frame_of(popped, lambda c: (fly_sprite(c, 14, 62, 1), outlined_text(c, "!", 10, 56, 9, width=2.4))), 200))
+    frames.append(with_fly(popped, lambda c: fly_sprite(c, 14, 62, 1), 200,
+                           lambda c: outlined_text(c, "!", 10, 56, 9, width=2.4)))
     flag = open_eyes(gun["flag"])
     landing = (78, 26)
     frames += buzz(flag, gun_eye_ref, bezier((14, 62), (30, 0), landing, 8), 110)
     unimpressed = close_eyes(move_eyes(flag, 1, -4), 0.45)
-    frames += [(frame_of(unimpressed, lambda c, k=k: fly_sprite(c, *landing, k in (2, 3))), 280) for k in range(6)]
+    frames += [with_fly(unimpressed, lambda c, k=k: fly_sprite(c, *landing, k in (2, 3)), 280) for k in range(6)]
     frames += buzz(close_eyes(flag, 0.45), gun_eye_ref, bezier(landing, (100, 0), (140, -8), 5), 90)
     frames.append((flag, 400))
     return [("fly_gag", "states", frames, ONE_SHOT)]
@@ -443,6 +450,18 @@ def teleport(kit):
         ("teleport_out", "states", vanish, {"loop": False, "loops": 1, "next": "teleport_in"}),
         ("teleport_in", "states", appear, ONE_SHOT),
     ]
+
+
+def looks(kit):
+    poses = {}
+    for pose in (STANDING, SITTING):
+        base = kit.sprite(pose)
+        blobs = eye_blobs(base)
+        eyes = (sum(b[0] + b[2] for b in blobs) / (2 * len(blobs)), sum(b[1] + b[3] for b in blobs) / (2 * len(blobs)))
+        frames = [pose if (dx, dy) == (0, 0) else move_eyes(base, LOOK_X[dx], LOOK_Y[dy], blobs)
+                  for dx, dy in LOOK_DIRECTIONS]
+        poses[pose] = {"eyes": eyes, "frames": frames}
+    return poses
 
 
 def animations(kit):

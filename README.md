@@ -10,6 +10,7 @@ Uses the [Shimeji-ee](https://kilkakon.com/shimeji/) / [Shijima-Qt](https://gets
 - Shimeji-style wandering: walks, climbs screen edges, sits, jumps, falls
 - Drag and throw with physics simulation
 - Multi-monitor support
+- Eyes that follow the mouse pointer (Hyprland) and seasonal hats
 - Right-click context menu for manual state control, scaling, and special actions
 - Auto-starts with your first Claude Code session and leaves with the last one (via hooks)
 - One pet for the whole desktop — every session (and subagent) drives the same pet
@@ -63,7 +64,7 @@ Claude Pet installs hooks into Claude Code that write state changes to a file. T
 | Idle for 60s | Idle (wandering around) |
 | Last session ends | Pet exits |
 
-When idle, the pet wanders the screen Shimeji-style — walking along edges, climbing walls, sitting, kicking, jumping, and now and then riding a scooter or a unicorn across the screen, getting hooked by a blue balloon and floating up, scared and sweating, until it pops, sneaking around in a cardboard box, teleporting, or pulling a trick (finger gun, a fly that won't leave him alone, vibing to his walkman, popping his own head off, kicking the screen, zen floating, disco). When you send a prompt he may hold up a "MAXIMUM EFFORT!" sign, and sometimes a "NAILED IT!" one when Claude finishes. After 5 minutes without Claude activity he takes a nap of a minute or two (Claude starting, or grabbing him, wakes him up early), and during long work sessions he may doze off at his laptop. Everything in the menu works at any moment, even mid-nap or mid-trick. Drag it around, throw it, or right-click it for the menu (scale, mascot, poses, rides, teleport, tricks, quit).
+When idle, the pet wanders the screen Shimeji-style — walking along edges, climbing walls, sitting, kicking, jumping, and now and then riding a scooter or a unicorn across the screen, getting hooked by a blue balloon and floating up, scared and sweating, until it pops, sneaking around in a cardboard box, teleporting, or pulling a trick (finger gun, a fly that won't leave him alone, vibing to his walkman, popping his own head off, kicking the screen, zen floating, disco, eating a chimichanga). When you send a prompt he may hold up a "MAXIMUM EFFORT!" sign, and sometimes a "NAILED IT!" one when Claude finishes. After 5 minutes without Claude activity he takes a nap of a minute or two (Claude starting, or grabbing him, wakes him up early), and during long work sessions he may doze off at his laptop. While he stands or sits still, his eyes follow your mouse pointer (on Hyprland). He wears a pumpkin hat in October and a Santa hat in December. Everything in the menu works at any moment, even mid-nap or mid-trick. Drag it around, throw it, or right-click it for the menu (scale, mascot, hat, poses, rides, teleport, tricks, quit).
 
 The hook script registers every live session in `/tmp/claude-pet-sessions/`; the pet is started by the first one and stopped by the last one, so several sessions, terminals and subagents share a single pet.
 
